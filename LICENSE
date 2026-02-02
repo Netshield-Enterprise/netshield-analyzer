@@ -1,0 +1,56 @@
+# NetShield Real Risk Analysis Dual License
+
+NetShield Real Risk Analysis is available under a dual license model:
+
+## 1. Open Source License (AGPL-3.0)
+
+For open source projects and evaluation purposes, NetShield Real Risk Analysis is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+
+See [LICENSE-AGPL](LICENSE-AGPL) for full terms.
+
+**Key Points:**
+- ✅ Free to use for open source projects
+- ✅ Free for evaluation and testing
+- ⚠️ Requires derivative works to be open source
+- ⚠️ Requires making source code available if used as a network service
+
+## 2. Commercial License
+
+For commercial use, proprietary applications, or if you cannot comply with AGPL-3.0 terms, a **Commercial License** is available.
+
+See [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL) for full terms.
+
+**Benefits:**
+- ✅ No copyleft requirements
+- ✅ Use in proprietary software
+- ✅ No source code disclosure required
+- ✅ Priority support
+- ✅ Commercial warranty
+
+**Contact:** For commercial licensing inquiries, contact licensing@net-shield.net
+
+---
+
+## Which License Should I Choose?
+
+| Use Case | License |
+|----------|---------|
+| Open source project | AGPL-3.0 |
+| Personal evaluation | AGPL-3.0 |
+| Internal tools (open source OK) | AGPL-3.0 |
+| Commercial SaaS product | Commercial |
+| Proprietary enterprise software | Commercial |
+| Reselling or embedding | Commercial |
+
+---
+
+## FAQ
+
+**Q: Can I use NetShield Real Risk Analysis for free?**
+A: Yes, under AGPL-3.0 for open source projects and evaluation.
+
+**Q: What if I'm not sure which license I need?**
+A: Start with AGPL-3.0 for evaluation. Contact us for commercial licensing when ready to deploy.
+
+**Q: Can I switch from AGPL to Commercial later?**
+A: Yes, contact us anytime to upgrade to a Commercial License.
