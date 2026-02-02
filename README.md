@@ -24,10 +24,17 @@ go install github.com/Netshield-Enterprise/netshield-analyzer/cmd/analyzer@lates
 
 **From Release (Recommended):**
 ```bash
-# Linux/macOS
-curl -LO https://github.com/Netshield-Enterprise/netshield-analyzer/releases/latest/download/netshield-analyzer-linux-amd64.tar.gz
-tar xzf netshield-analyzer-linux-amd64.tar.gz
-sudo mv netshield-analyzer /usr/local/bin/
+# Linux AMD64
+curl -LO https://github.com/Netshield-Enterprise/netshield-analyzer/releases/latest/download/netshield-analyzer-linux-amd64
+chmod +x netshield-analyzer-linux-amd64
+sudo mv netshield-analyzer-linux-amd64 /usr/local/bin/netshield-analyzer
+
+# macOS Apple Silicon
+curl -LO https://github.com/Netshield-Enterprise/netshield-analyzer/releases/latest/download/netshield-analyzer-darwin-arm64
+chmod +x netshield-analyzer-darwin-arm64
+sudo mv netshield-analyzer-darwin-arm64 /usr/local/bin/netshield-analyzer
+
+# Windows: Download netshield-analyzer-windows-amd64.exe and add to PATH
 ```
 
 ### Basic Usage

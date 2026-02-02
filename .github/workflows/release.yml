@@ -35,16 +35,22 @@ jobs:
             
             ### Installation
             
-            Download the binary for your platform below and add it to your PATH.
+            Download the binary for your platform:
             
             **Linux/macOS:**
             ```bash
-            tar xzf netshield-analyzer-${{ steps.get_version.outputs.version }}-linux-amd64.tar.gz
-            sudo mv netshield-analyzer /usr/local/bin/
+            # Download
+            curl -LO https://github.com/Netshield-Enterprise/netshield-analyzer/releases/download/v${{ steps.get_version.outputs.version }}/netshield-analyzer-linux-amd64
+            
+            # Make executable
+            chmod +x netshield-analyzer-linux-amd64
+            
+            # Move to PATH
+            sudo mv netshield-analyzer-linux-amd64 /usr/local/bin/netshield-analyzer
             ```
             
             **Windows:**
-            Extract the zip and add the folder to your PATH.
+            Download `netshield-analyzer-windows-amd64.exe` and add to your PATH.
             
             ### Verify Installation
             
@@ -113,36 +119,14 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -ldflags="-s -w -X main.Version=${{ needs.release.outputs.version }}" -o netshield-analyzer${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/analyzer
+          go build -ldflags="-s -w -X main.Version=${{ needs.release.outputs.version }}" -o netshield-analyzer-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/analyzer
 
-      - name: Create archive (Unix)
-        if: matrix.goos != 'windows'
-        run: |
-          tar czf netshield-analyzer-${{ needs.release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz netshield-analyzer LICENSE README.md
-
-      - name: Create archive (Windows)
-        if: matrix.goos == 'windows'
-        run: |
-          7z a netshield-analyzer-${{ needs.release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.zip netshield-analyzer.exe LICENSE README.md
-
-      - name: Upload Release Asset (Unix)
-        if: matrix.goos != 'windows'
+      - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.release.outputs.upload_url }}
-          asset_path: ./netshield-analyzer-${{ needs.release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-          asset_name: netshield-analyzer-${{ needs.release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload Release Asset (Windows)
-        if: matrix.goos == 'windows'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.release.outputs.upload_url }}
-          asset_path: ./netshield-analyzer-${{ needs.release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.zip
-          asset_name: netshield-analyzer-${{ needs.release.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.zip
-          asset_content_type: application/zip
+          asset_path: ./netshield-analyzer-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          asset_name: netshield-analyzer-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+          asset_content_type: application/octet-stream
