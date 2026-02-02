@@ -14,7 +14,7 @@ NetShield determines whether vulnerabilities in your dependencies are actually e
 ```bash
 git clone https://github.com/Netshield-Enterprise/netshield-analyzer.git
 cd netshield-analyzer
-go build -o netshield ./cmd/analyzer
+go build -o netshield-analyzer ./cmd/analyzer
 ```
 
 **Using Go Install:**
@@ -25,9 +25,9 @@ go install github.com/Netshield-Enterprise/netshield-analyzer/cmd/analyzer@lates
 **From Release (Recommended):**
 ```bash
 # Linux/macOS
-curl -LO https://github.com/Netshield-Enterprise/netshield-analyzer/releases/latest/download/netshield-linux-amd64.tar.gz
-tar xzf netshield-linux-amd64.tar.gz
-sudo mv netshield /usr/local/bin/
+curl -LO https://github.com/Netshield-Enterprise/netshield-analyzer/releases/latest/download/netshield-analyzer-linux-amd64.tar.gz
+tar xzf netshield-analyzer-linux-amd64.tar.gz
+sudo mv netshield-analyzer /usr/local/bin/
 ```
 
 ### Basic Usage
@@ -35,13 +35,13 @@ sudo mv netshield /usr/local/bin/
 ```bash
 # Analyze a Maven project
 cd /path/to/your/maven/project
-netshield --packages com.yourcompany
+netshield-analyzer --packages com.yourcompany
 
 # CI/CD mode (minimal output, proper exit codes)
-netshield --packages com.yourcompany --format core
+netshield-analyzer --packages com.yourcompany --format core
 
 # JSON output for tooling
-netshield --packages com.yourcompany --format json
+netshield-analyzer --packages com.yourcompany --format json
 ```
 
 ---
@@ -75,7 +75,7 @@ NetShield is designed for CI/CD pipelines with proper exit codes:
 
 ```yaml
 - name: Security Gate
-  run: netshield --packages com.yourcompany --format core
+  run: netshield-analyzer --packages com.yourcompany --format core
 ```
 
 ### GitLab CI
@@ -83,13 +83,13 @@ NetShield is designed for CI/CD pipelines with proper exit codes:
 ```yaml
 netshield:
   script:
-    - netshield --packages com.yourcompany --format core
+    - netshield-analyzer --packages com.yourcompany --format core
 ```
 
 ### Jenkins
 
 ```groovy
-sh 'netshield --packages com.yourcompany --format core'
+sh 'netshield-analyzer --packages com.yourcompany --format core'
 ```
 
 ---
@@ -100,28 +100,28 @@ sh 'netshield --packages com.yourcompany --format core'
 Minimal output, clear decision, proper exit codes.
 
 ```bash
-netshield --packages com.example --format core
+netshield-analyzer --packages com.example --format core
 ```
 
 ### Executive (Default)
 Decision + intelligence + supply chain scoring.
 
 ```bash
-netshield --packages com.example
+netshield-analyzer --packages com.example
 ```
 
 ### Debug
 Full technical analysis with call graphs.
 
 ```bash
-netshield --packages com.example --format debug
+netshield-analyzer --packages com.example --format debug
 ```
 
 ### JSON
 Machine-readable for tooling integration.
 
 ```bash
-netshield --packages com.example --format json
+netshield-analyzer --packages com.example --format json
 ```
 
 ---
