@@ -35,3 +35,6 @@ build/
 
 # Artifacts directory (development only)
 .gemini/
+
+# md files
+CI_CD_EXIT_CODES.md

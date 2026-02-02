@@ -104,5 +104,16 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to generate report: %w", err)
 	}
 
+	// Exit codes for CI/CD integration:
+	// 0 = Safe to ship (no reachable vulnerabilities)
+	// 1 = Reachable vulnerability detected (block deployment)
+	// 2 = Analysis failure (handled by cobra error handling above)
+
+	if summary.Reachable > 0 {
+		// Reachable vulnerabilities found - fail the build
+		os.Exit(1)
+	}
+
+	// Safe to ship
 	return nil
 }

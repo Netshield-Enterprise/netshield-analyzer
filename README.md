@@ -47,13 +47,44 @@ It provides three output formats:
 - **Executive**: Decision + intelligence for security reports
 - **Debug**: Technical deep-dive for investigation
 
-### Exit Codes
+## Exit Code Behavior
 
-| Code | Meaning | CI/CD Action |
-|------|---------|--------------|
-| `0` | Safe to ship | Pass build |
-| `1` | Reachable vulnerability detected | Fail build |
-| `2` | Analysis failure | Fail build (investigate) |
+| Exit Code | Meaning | CI/CD Action | When It Happens |
+|-----------|---------|--------------|-----------------|
+| **0** | Safe to ship | ✅ Pass build | No reachable vulnerabilities detected |
+| **1** | Reachable vulnerability | ❌ Fail build | At least one reachable vulnerability found |
+| **2** | Analysis failure | ❌ Fail build | Error during analysis (network, parsing, etc.) |
+
+## How It Works
+
+1. **Exit 0 (Success)**: All vulnerabilities are unreachable or no vulnerabilities found
+2. **Exit 1 (Block)**: At least one vulnerability is reachable from application code
+3. **Exit 2 (Error)**: Analysis couldn't complete (Maven parse error, network failure, etc.)
+
+## Testing Exit Codes Locally
+
+```bash
+# Run analysis
+netshield --packages com.example --format core
+
+# Check exit code
+echo $?
+
+# 0 = safe to ship
+# 1 = reachable vulnerability (would fail CI/CD)
+# 2 = analysis error (would fail CI/CD)
+```
+
+## Output Format Recommendation for CI/CD
+
+Use `--format core` for CI/CD pipelines:
+- Minimal output (fast to parse in logs)
+- Clear decision (SAFE TO SHIP / DO NOT SHIP)
+- Proper exit codes
+
+```bash
+netshield --packages com.yourcompany --format core
+```
 
 ---
 
