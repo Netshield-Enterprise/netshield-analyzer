@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  netshield:
+    build: .
+    image: netshield/analyzer:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - NETSHIELD_LICENSE_KEY=${NETSHIELD_LICENSE_KEY:-}
+    volumes:
+      # Mount your Java project here
+      - ./testdata/sample-project:/project:ro
+      # Optional: persist scan data
+      - netshield-data:/project/.netshield
+    restart: unless-stopped
+
+volumes:
+  netshield-data:

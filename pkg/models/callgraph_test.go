@@ -32,7 +32,7 @@ func TestCallGraph_AddNode(t *testing.T) {
 func TestCallGraph_AddEdge(t *testing.T) {
 	cg := NewCallGraph()
 
-	cg.AddEdge("method1", "method2")
+	cg.AddEdge("method1", "method2", CallTypeStatic)
 
 	if len(cg.Edges) != 1 {
 		t.Errorf("Expected 1 edge, got %d", len(cg.Edges))

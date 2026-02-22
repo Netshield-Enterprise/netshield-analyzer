@@ -39,3 +39,8 @@ build/
 
 # md files
 CI_CD_EXIT_CODES.md
+
+# Windows / Runtime files
+*.Identifier
+.netshield/
+monitor.log

@@ -26,6 +26,8 @@ func NewJARAnalyzer(jarPath string) *JARAnalyzer {
 // ClassFile represents a parsed Java class file
 type ClassFile struct {
 	ClassName    string
+	SuperClass   string
+	Interfaces   []string
 	Methods      []*MethodInfo
 	ConstantPool []interface{}
 }
@@ -43,6 +45,7 @@ type MethodCall struct {
 	ClassName  string
 	MethodName string
 	Descriptor string
+	Opcode     byte // The bytecode opcode (0xB6-0xBA)
 }
 
 // AnalyzeJAR extracts all classes and methods from a JAR file
@@ -132,13 +135,21 @@ func (ja *JARAnalyzer) parseClassFile(data []byte) (*ClassFile, error) {
 	// Read super class
 	var superClass uint16
 	binary.Read(reader, binary.BigEndian, &superClass)
+	var superClassName string
+	if superClass != 0 {
+		superClassName = ja.getClassName(constantPool, int(superClass))
+	}
 
 	// Read interfaces
 	var interfacesCount uint16
 	binary.Read(reader, binary.BigEndian, &interfacesCount)
+	interfaceNames := make([]string, 0, interfacesCount)
 	for i := 0; i < int(interfacesCount); i++ {
 		var iface uint16
 		binary.Read(reader, binary.BigEndian, &iface)
+		if iface != 0 {
+			interfaceNames = append(interfaceNames, ja.getClassName(constantPool, int(iface)))
+		}
 	}
 
 	// Read fields
@@ -163,8 +174,63 @@ func (ja *JARAnalyzer) parseClassFile(data []byte) (*ClassFile, error) {
 		methods = append(methods, method)
 	}
 
+	// Read class attributes
+	var attributesCount uint16
+	binary.Read(reader, binary.BigEndian, &attributesCount)
+
+	bootstrapMethods := make(map[uint16]uint16)
+	for i := 0; i < int(attributesCount); i++ {
+		var attrNameIndex uint16
+		binary.Read(reader, binary.BigEndian, &attrNameIndex)
+		attrName := ja.getString(constantPool, int(attrNameIndex))
+
+		var attrLength uint32
+		binary.Read(reader, binary.BigEndian, &attrLength)
+
+		if attrName == "BootstrapMethods" {
+			attrData := make([]byte, attrLength)
+			reader.Read(attrData)
+			
+			attrReader := bytes.NewReader(attrData)
+			var numBootstrapMethods uint16
+			binary.Read(attrReader, binary.BigEndian, &numBootstrapMethods)
+			
+			for j := uint16(0); j < numBootstrapMethods; j++ {
+				var methodRef uint16
+				binary.Read(attrReader, binary.BigEndian, &methodRef)
+				
+				var numArgs uint16
+				binary.Read(attrReader, binary.BigEndian, &numArgs)
+				
+				var targetHandle uint16
+				for k := uint16(0); k < numArgs; k++ {
+					var arg uint16
+					binary.Read(attrReader, binary.BigEndian, &arg)
+					if k == 1 {
+						targetHandle = arg
+					}
+				}
+				
+				if targetHandle != 0 {
+					bootstrapMethods[j] = targetHandle
+				}
+			}
+		} else {
+			reader.Seek(int64(attrLength), io.SeekCurrent)
+		}
+	}
+
+	// Now extract calls with bootstrap methods context
+	for _, method := range methods {
+		if method.Code != nil {
+			method.Calls = ja.extractMethodCalls(method.Code, constantPool, bootstrapMethods)
+		}
+	}
+
 	return &ClassFile{
 		ClassName:    className,
+		SuperClass:   superClassName,
+		Interfaces:   interfaceNames,
 		Methods:      methods,
 		ConstantPool: constantPool,
 	}, nil
@@ -288,7 +354,7 @@ func (ja *JARAnalyzer) parseMethod(reader *bytes.Reader, constantPool []interfac
 		// Parse Code attribute to extract method calls
 		if attrName == "Code" {
 			method.Code = attrData
-			method.Calls = ja.extractMethodCalls(attrData, constantPool)
+			// method.Calls are extracted later once BootstrapMethods are parsed
 		}
 	}
 
@@ -296,7 +362,7 @@ func (ja *JARAnalyzer) parseMethod(reader *bytes.Reader, constantPool []interfac
 }
 
 // extractMethodCalls extracts method invocations from bytecode
-func (ja *JARAnalyzer) extractMethodCalls(code []byte, constantPool []interface{}) []MethodCall {
+func (ja *JARAnalyzer) extractMethodCalls(code []byte, constantPool []interface{}, bootstrapMethods map[uint16]uint16) []MethodCall {
 	calls := make([]MethodCall, 0)
 
 	if len(code) < 8 {
@@ -317,8 +383,9 @@ func (ja *JARAnalyzer) extractMethodCalls(code []byte, constantPool []interface{
 		opcode := bytecode[i]
 
 		// Check for invoke instructions
-		// 0xB6 = invokevirtual, 0xB7 = invokespecial, 0xB8 = invokestatic, 0xB9 = invokeinterface
-		if opcode == 0xB6 || opcode == 0xB7 || opcode == 0xB8 || opcode == 0xB9 {
+		// 0xB6 = invokevirtual, 0xB7 = invokespecial, 0xB8 = invokestatic,
+		// 0xB9 = invokeinterface, 0xBA = invokedynamic
+		if opcode == 0xB6 || opcode == 0xB7 || opcode == 0xB8 || opcode == 0xB9 || opcode == 0xBA {
 			if i+2 < len(bytecode) {
 				// Read constant pool index
 				indexByte1 := bytecode[i+1]
@@ -327,7 +394,7 @@ func (ja *JARAnalyzer) extractMethodCalls(code []byte, constantPool []interface{
 
 				// Extract method reference
 				if cpIndex < len(constantPool) {
-					call := ja.resolveMethodCall(constantPool, cpIndex)
+					call := ja.resolveMethodCall(constantPool, cpIndex, opcode, bootstrapMethods)
 					if call != nil {
 						calls = append(calls, *call)
 					}
@@ -336,6 +403,8 @@ func (ja *JARAnalyzer) extractMethodCalls(code []byte, constantPool []interface{
 				// Skip operands
 				if opcode == 0xB9 {
 					i += 4 // invokeinterface has 2 additional bytes
+				} else if opcode == 0xBA {
+					i += 4 // invokedynamic has 2 additional bytes (2 zeros)
 				} else {
 					i += 2
 				}
@@ -347,9 +416,44 @@ func (ja *JARAnalyzer) extractMethodCalls(code []byte, constantPool []interface{
 }
 
 // resolveMethodCall resolves a method call from the constant pool
-func (ja *JARAnalyzer) resolveMethodCall(constantPool []interface{}, index int) *MethodCall {
+func (ja *JARAnalyzer) resolveMethodCall(constantPool []interface{}, index int, opcode byte, bootstrapMethods map[uint16]uint16) *MethodCall {
 	if index >= len(constantPool) || constantPool[index] == nil {
 		return nil
+	}
+
+	if opcode == 0xBA {
+		invokeDyn, ok := constantPool[index].(map[string]uint16)
+		if !ok {
+			return nil
+		}
+		
+		bootstrapIdx, hasBootstrap := invokeDyn["bootstrap"]
+		if !hasBootstrap {
+			return nil
+		}
+		
+		methodHandleIdx, handleOk := bootstrapMethods[bootstrapIdx]
+		if !handleOk || int(methodHandleIdx) >= len(constantPool) {
+			return nil
+		}
+		
+		methodHandle, mhOk := constantPool[methodHandleIdx].(map[string]interface{})
+		if !mhOk {
+			return nil
+		}
+		
+		refIndexVal, refOk := methodHandle["index"]
+		if !refOk {
+			return nil
+		}
+		
+		refIndex := int(refIndexVal.(uint16))
+		
+		call := ja.resolveMethodCall(constantPool, refIndex, 0xB8, bootstrapMethods)
+		if call != nil {
+			call.Opcode = 0xBA
+		}
+		return call
 	}
 
 	methodRef, ok := constantPool[index].(map[string]uint16)
@@ -378,6 +482,7 @@ func (ja *JARAnalyzer) resolveMethodCall(constantPool []interface{}, index int) 
 		ClassName:  className,
 		MethodName: methodName,
 		Descriptor: descriptor,
+		Opcode:     opcode,
 	}
 }
 
@@ -453,7 +558,8 @@ func (ja *JARAnalyzer) BuildCallGraphFromJAR() (*models.CallGraph, error) {
 			// Add edges for method calls
 			for _, call := range method.Calls {
 				calleeID := models.GetMethodID(call.ClassName, call.MethodName, call.Descriptor)
-				cg.AddEdge(methodID, calleeID)
+				// TODO: Determine call type from opcode stored in MethodCall
+				cg.AddEdge(methodID, calleeID, models.CallTypeUnknown)
 			}
 		}
 	}

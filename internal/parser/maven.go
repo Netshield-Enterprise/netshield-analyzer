@@ -85,8 +85,10 @@ func (mp *MavenParser) parsePOM(pomPath string) (*POM, error) {
 
 // getDependencyTreeFromMaven uses mvn dependency:tree to get full dependency graph
 func (mp *MavenParser) getDependencyTreeFromMaven() (*models.DependencyTree, error) {
+	// Securely execute the Maven command without a shell
+	// mp.projectPath is used as Dir, which is safe, and arguments are passed cleanly
 	cmd := exec.Command("mvn", "dependency:tree", "-DoutputType=text")
-	cmd.Dir = mp.projectPath
+	cmd.Dir = filepath.Clean(mp.projectPath)
 	
 	output, err := cmd.CombinedOutput()
 	if err != nil {

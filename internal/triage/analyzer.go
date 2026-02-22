@@ -151,9 +151,9 @@ func (a *Analyzer) GetSummary(results []*models.TriageResult) *TriageSummary {
 
 // TriageSummary provides a summary of triage results
 type TriageSummary struct {
-	Total       int
-	Reachable   int
-	Unreachable int
-	Unknown     int
-	BySeverity  map[string]int
+	Total       int            `json:"total"`
+	Reachable   int            `json:"reachable"`
+	Unreachable int            `json:"unreachable"`
+	Unknown     int            `json:"unknown"`
+	BySeverity  map[string]int `json:"by_severity"`
 }

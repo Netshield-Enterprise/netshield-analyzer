@@ -12,15 +12,21 @@ import (
 
 // Builder constructs call graphs from application code and dependencies
 type Builder struct {
-	projectPath string
-	appPackages []string // Application package prefixes
+	projectPath    string
+	appPackages    []string // Application package prefixes
+	classHierarchy map[string][]string
+	classRegistry  map[string]*bytecode.ClassFile
+	isExternalMap  map[string]bool
 }
 
 // NewBuilder creates a new call graph builder
 func NewBuilder(projectPath string) *Builder {
 	return &Builder{
-		projectPath: projectPath,
-		appPackages: make([]string, 0),
+		projectPath:    projectPath,
+		appPackages:    make([]string, 0),
+		classHierarchy: make(map[string][]string),
+		classRegistry:  make(map[string]*bytecode.ClassFile),
+		isExternalMap:  make(map[string]bool),
 	}
 }
 
@@ -46,7 +52,7 @@ func (b *Builder) BuildCallGraph(dependencies []*models.Dependency) (*models.Cal
 			continue
 		}
 
-		b.addClassesToCallGraph(cg, classes, false)
+		b.registerClasses(classes, false)
 	}
 
 	// Then, analyze dependencies
@@ -62,38 +68,145 @@ func (b *Builder) BuildCallGraph(dependencies []*models.Dependency) (*models.Cal
 			continue
 		}
 
-		b.addClassesToCallGraph(cg, classes, true)
+		b.registerClasses(classes, true)
 	}
+
+	// Now build call graph nodes and edges
+	b.buildGraphNodesAndEdges(cg)
 
 	return cg, nil
 }
 
-// addClassesToCallGraph adds classes and their methods to the call graph
-func (b *Builder) addClassesToCallGraph(cg *models.CallGraph, classes []*bytecode.ClassFile, isExternal bool) {
+// registerClasses records classes and their hierarchy
+func (b *Builder) registerClasses(classes []*bytecode.ClassFile, isExternal bool) {
 	for _, class := range classes {
-		// Determine if this is application code or external
+		b.classRegistry[class.ClassName] = class
 		isAppCode := !isExternal && b.isApplicationClass(class.ClassName)
+		b.isExternalMap[class.ClassName] = !isAppCode
+
+		// Register subclasses and implementors
+		if class.SuperClass != "" && class.SuperClass != "java/lang/Object" {
+			b.classHierarchy[class.SuperClass] = append(b.classHierarchy[class.SuperClass], class.ClassName)
+		}
+		for _, iface := range class.Interfaces {
+			b.classHierarchy[iface] = append(b.classHierarchy[iface], class.ClassName)
+		}
+	}
+}
+
+// buildGraphNodesAndEdges adds all nodes and resolves all edges including virtual dispatch
+func (b *Builder) buildGraphNodesAndEdges(cg *models.CallGraph) {
+	reflectionAnalyzer := bytecode.NewReflectionAnalyzer()
+
+	// First pass: Add all nodes
+	for _, class := range b.classRegistry {
+		isExt := b.isExternalMap[class.ClassName]
 
 		for _, method := range class.Methods {
 			methodID := models.GetMethodID(class.ClassName, method.Name, method.Descriptor)
 
-			// Add method node
+			// Analyze method for edge cases
+			isReflective := reflectionAnalyzer.IsReflective(method.Calls)
+			isLambda := strings.HasPrefix(method.Name, "lambda$")
+			hasDynamic := false
+			for _, call := range method.Calls {
+				if call.Opcode == 0xBA {
+					hasDynamic = true
+					break
+				}
+			}
+
 			node := &models.MethodNode{
 				ClassName:  class.ClassName,
 				MethodName: method.Name,
 				Signature:  method.Descriptor,
-				IsExternal: !isAppCode,
+				IsExternal: isExt,
 				Package:    b.extractPackage(class.ClassName),
+				Interfaces: class.Interfaces,
+
+				IsReflective: isReflective,
+				IsLambda:     isLambda,
+				IsDynamic:    hasDynamic,
 			}
 
 			cg.AddNode(methodID, node)
+		}
+	}
 
-			// Add edges for method calls
+	// Second pass: Add all edges
+	for _, class := range b.classRegistry {
+		for _, method := range class.Methods {
+			methodID := models.GetMethodID(class.ClassName, method.Name, method.Descriptor)
+
 			for _, call := range method.Calls {
 				calleeID := models.GetMethodID(call.ClassName, call.MethodName, call.Descriptor)
-				cg.AddEdge(methodID, calleeID)
+				callType := getCallTypeFromOpcode(call.Opcode)
+				
+				// Always add the direct edge (to abstract method/interface method)
+				cg.AddEdge(methodID, calleeID, callType)
+
+				// For virtual dispatch, add edges to known implementors
+				if callType == models.CallTypeVirtual || callType == models.CallTypeInterface {
+					b.addVirtualEdges(cg, methodID, call.ClassName, call.MethodName, call.Descriptor)
+				}
 			}
 		}
+	}
+}
+
+// addVirtualEdges recursively finds implementors and adds edges to overridden methods
+func (b *Builder) addVirtualEdges(cg *models.CallGraph, callerID, targetClass, methodName, descriptor string) {
+	visited := make(map[string]bool)
+	var queue []string
+	queue = append(queue, targetClass)
+
+	for len(queue) > 0 {
+		currentClass := queue[0]
+		queue = queue[1:]
+
+		if visited[currentClass] {
+			continue
+		}
+		visited[currentClass] = true
+
+		// Check if this class defines the method
+		if classData, ok := b.classRegistry[currentClass]; ok {
+			for _, m := range classData.Methods {
+				if m.Name == methodName && m.Descriptor == descriptor {
+					// Add virtual edge if it's not the original abstract call
+					if currentClass != targetClass {
+						virtualID := models.GetMethodID(currentClass, methodName, descriptor)
+						cg.AddEdge(callerID, virtualID, models.CallTypeVirtual)
+					}
+					break
+				}
+			}
+		}
+
+		// Enqueue subclasses / implementors
+		if subclasses, exists := b.classHierarchy[currentClass]; exists {
+			queue = append(queue, subclasses...)
+		}
+	}
+}
+
+// addClassesToCallGraph was replaced by multi-pass buildGraphNodesAndEdges
+
+// getCallTypeFromOpcode converts JVM bytecode opcode to CallType
+func getCallTypeFromOpcode(opcode byte) models.CallType {
+	switch opcode {
+	case 0xB8: // invokestatic
+		return models.CallTypeStatic
+	case 0xB6: // invokevirtual
+		return models.CallTypeVirtual
+	case 0xB9: // invokeinterface
+		return models.CallTypeInterface
+	case 0xB7: // invokespecial (constructors, super, private)
+		return models.CallTypeSpecial
+	case 0xBA: // invokedynamic (lambdas, method references)
+		return models.CallTypeDynamic
+	default:
+		return models.CallTypeUnknown
 	}
 }
 
@@ -214,8 +327,22 @@ func (b *Builder) findCommonEntryPoints(cg *models.CallGraph) []string {
 		}
 
 		// Look for Spring controller methods (heuristic: public methods in classes with "Controller")
-		if strings.Contains(node.ClassName, "Controller") && node.MethodName != "<init>" {
+		if strings.Contains(node.ClassName, "Controller") && node.MethodName != "<init>" && node.MethodName != "<clinit>" {
 			entryPoints = append(entryPoints, id)
+		}
+
+		// Look for JAX-RS / Jakarta REST Endpoints
+		if strings.Contains(node.ClassName, "Resource") || strings.Contains(node.ClassName, "Endpoint") {
+			if node.MethodName != "<init>" && node.MethodName != "<clinit>" {
+				entryPoints = append(entryPoints, id)
+			}
+		}
+
+		// Look for Message Driven Beans / Kafka Listeners
+		if strings.Contains(node.MethodName, "onMessage") || strings.Contains(node.MethodName, "consume") {
+			if node.MethodName != "<init>" && node.MethodName != "<clinit>" {
+				entryPoints = append(entryPoints, id)
+			}
 		}
 	}
 
