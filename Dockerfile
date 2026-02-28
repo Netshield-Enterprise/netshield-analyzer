@@ -40,7 +40,7 @@ RUN mkdir -p /data
 EXPOSE 8080
 
 # Environment variables
-ENV NETSHIELD_LICENSE_KEY=""
+# License key should be injected dynamically via runtime environment variables rather than hardcoded in the image.
 
 # Volume for project files
 VOLUME ["/project"]
