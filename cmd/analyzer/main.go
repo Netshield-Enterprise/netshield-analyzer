@@ -14,7 +14,9 @@ import (
 	"github.com/Netshield-Enterprise/netshield-analyzer/internal/api"
 	"github.com/Netshield-Enterprise/netshield-analyzer/internal/callgraph"
 	"github.com/Netshield-Enterprise/netshield-analyzer/internal/cve"
+	"github.com/Netshield-Enterprise/netshield-analyzer/internal/config"
 	"github.com/Netshield-Enterprise/netshield-analyzer/internal/parser"
+	"github.com/Netshield-Enterprise/netshield-analyzer/internal/telemetry"
 	"github.com/Netshield-Enterprise/netshield-analyzer/internal/triage"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +27,7 @@ var (
 	appPackages   []string
 	entryPoints   []string
 	skipCVELookup bool
+	keyStdin      bool
 )
 
 func main() {
@@ -33,6 +36,9 @@ func main() {
 		Short: "NetShield Real Risk Analysis",
 		Long: `NetShield analyzes Java projects to determine real exploitability of CVEs.
 Stop wasting time on vulnerabilities that don't matter.`,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			return config.InitResolver(keyStdin)
+		},
 		RunE: runAnalysis,
 	}
 
@@ -41,6 +47,7 @@ Stop wasting time on vulnerabilities that don't matter.`,
 	rootCmd.PersistentFlags().StringSliceVarP(&appPackages, "packages", "a", []string{}, "Application package prefixes (comma-separated)")
 	rootCmd.PersistentFlags().StringSliceVarP(&entryPoints, "entry-points", "e", []string{}, "Custom entry points in format Package.Class.method(Signature)")
 	rootCmd.PersistentFlags().BoolVar(&skipCVELookup, "skip-cve", false, "Skip CVE lookup (only build call graph)")
+	rootCmd.PersistentFlags().BoolVar(&keyStdin, "key-stdin", false, "Read API key securely from stdin to avoid /proc snooping")
 
 	// Web UI flags
 	rootCmd.Flags().Bool("serve", false, "Start web UI server instead of CLI analysis")
@@ -140,6 +147,30 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 	if err := reporter.GenerateReport(os.Stdout, format); err != nil {
 		return fmt.Errorf("failed to generate report: %w", err)
 	}
+
+	// Fire async telemetry to platform API
+	decision := "SAFE_TO_SHIP"
+	if summary.Reachable > 0 {
+		decision = "BLOCK"
+	}
+	repoName := filepath.Base(projectPath)
+	if repoName == "." {
+		if dir, err := os.Getwd(); err == nil {
+			repoName = filepath.Base(dir)
+		}
+	}
+	tlmWg := telemetry.Send(telemetry.Payload{
+		ToolName:      "analyzer",
+		Repo:          repoName,
+		Decision:      decision,
+		FindingCount:  totalVulns,
+		BlockingCount: summary.Reachable,
+		Metadata: map[string]interface{}{
+			"unreachable": summary.Unreachable,
+			"unknown":     summary.Unknown,
+		},
+	})
+	defer telemetry.WaitWithTimeout(tlmWg, telemetry.DefaultTimeout)
 
 	// Exit codes for CI/CD integration:
 	// 0 = Safe to ship (no reachable vulnerabilities)
