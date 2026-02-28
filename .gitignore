@@ -1,7 +1,6 @@
 # Binaries
 netshield-analyzer
 netshield
-jar-analyzer
 *.exe
 *.dll
 *.so
@@ -31,7 +30,6 @@ go.work
 Thumbs.db
 
 # Build artifacts
-dist/
 build/
 
 # Artifacts directory (development only)
