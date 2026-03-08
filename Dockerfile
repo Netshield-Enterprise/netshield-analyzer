@@ -30,9 +30,6 @@ COPY --from=builder /app/netshield /usr/local/bin/
 # Copy web UI dist
 COPY --from=builder /app/web/dist ./web/dist
 
-# Copy jar-analyzer for Java bytecode analysis
-COPY --from=builder /app/jar-analyzer ./jar-analyzer
-
 # Create data directory
 RUN mkdir -p /data
 
