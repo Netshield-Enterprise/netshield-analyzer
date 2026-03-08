@@ -12,14 +12,38 @@ type Analyzer struct {
 	callGraph        *models.CallGraph
 	reachableMethods map[string]bool
 	vulnerabilities  map[string][]*models.Vulnerability
+
+	// Pre-built indexes for fast lookups
+	// reachableByClass maps className → []methodName for all reachable methods
+	reachableByClass map[string][]string
+	// reachableClasses is the deduplicated set of class names with reachable methods
+	reachableClasses []string
 }
 
-// NewAnalyzer creates a new triage analyzer
+// NewAnalyzer creates a new triage analyzer with pre-built indexes
 func NewAnalyzer(cg *models.CallGraph, reachable map[string]bool, vulns map[string][]*models.Vulnerability) *Analyzer {
+	// Build the class→methods index from reachable methods
+	byClass := make(map[string][]string)
+	for methodID, isReachable := range reachable {
+		if !isReachable {
+			continue
+		}
+		if node, exists := cg.Nodes[methodID]; exists {
+			byClass[node.ClassName] = append(byClass[node.ClassName], node.MethodName)
+		}
+	}
+
+	classes := make([]string, 0, len(byClass))
+	for cn := range byClass {
+		classes = append(classes, cn)
+	}
+
 	return &Analyzer{
 		callGraph:        cg,
 		reachableMethods: reachable,
 		vulnerabilities:  vulns,
+		reachableByClass: byClass,
+		reachableClasses: classes,
 	}
 }
 
@@ -52,11 +76,23 @@ func (a *Analyzer) analyzeVulnerability(depKey string, vuln *models.Vulnerabilit
 		return result
 	}
 
-	packageName := strings.ReplaceAll(parts[0], ".", "/") + "/" + parts[1]
+	// Generate candidate package prefixes to match against call graph nodes.
+	// Maven groupId:artifactId doesn't always map cleanly to Java package names.
+	// Examples of mismatches:
+	//   com.thoughtworks.xstream:xstream → classes in com/thoughtworks/xstream/ (not com/thoughtworks/xstream/xstream/)
+	//   com.fasterxml.jackson.core:jackson-databind → classes in com/fasterxml/jackson/databind/
+	//   org.apache.commons:commons-lang3 → classes in org/apache/commons/lang3/
+	packageCandidates := buildPackageCandidates(parts[0], parts[1])
 
 	// Check if we have specific affected methods
 	if len(vuln.AffectedMethods) > 0 {
-		isReachable := a.checkMethodsReachability(packageName, vuln.AffectedMethods)
+		isReachable := false
+		for _, pkg := range packageCandidates {
+			if a.checkMethodsReachability(pkg, vuln.AffectedMethods) {
+				isReachable = true
+				break
+			}
+		}
 		if isReachable {
 			result.Status = models.StatusReachable
 			result.Reason = fmt.Sprintf("Vulnerable methods %v are reachable from application code", vuln.AffectedMethods)
@@ -68,7 +104,13 @@ func (a *Analyzer) analyzeVulnerability(depKey string, vuln *models.Vulnerabilit
 		}
 	} else {
 		// No specific methods identified, check if any method from the package is reachable
-		isReachable := a.checkPackageReachability(packageName)
+		isReachable := false
+		for _, pkg := range packageCandidates {
+			if a.checkPackageReachability(pkg) {
+				isReachable = true
+				break
+			}
+		}
 		if isReachable {
 			result.Status = models.StatusUnknown
 			result.Reason = "Package is used by application, but specific vulnerable methods not identified"
@@ -83,22 +125,66 @@ func (a *Analyzer) analyzeVulnerability(depKey string, vuln *models.Vulnerabilit
 	return result
 }
 
-// checkMethodsReachability checks if specific methods are reachable
+// buildPackageCandidates generates multiple possible Java package prefixes from Maven coordinates.
+// Maven groupId:artifactId often doesn't directly map to Java package paths.
+func buildPackageCandidates(groupID, artifactID string) []string {
+	groupPath := strings.ReplaceAll(groupID, ".", "/")
+	candidates := make([]string, 0, 4)
+	seen := make(map[string]bool)
+
+	add := func(c string) {
+		if !seen[c] {
+			seen[c] = true
+			candidates = append(candidates, c)
+		}
+	}
+
+	// Pattern 1: groupId/artifactId (e.g., org/yaml/snakeyaml)
+	add(groupPath + "/" + artifactID)
+
+	// Pattern 2: groupId only (e.g., com/thoughtworks/xstream)
+	// Handles cases where artifactId duplicates the last segment of groupId
+	add(groupPath)
+
+	// Pattern 3: Strip common artifact prefixes and append to groupId parent
+	// e.g., com.fasterxml.jackson.core:jackson-databind → com/fasterxml/jackson/databind
+	cleanArtifact := artifactID
+	for _, prefix := range []string{"jackson-", "spring-", "commons-", "jakarta.", "javax."} {
+		if strings.HasPrefix(artifactID, prefix) {
+			cleanArtifact = strings.TrimPrefix(artifactID, prefix)
+			break
+		}
+	}
+	if cleanArtifact != artifactID {
+		// Try replacing the last groupId segment with the clean artifact name
+		lastSlash := strings.LastIndex(groupPath, "/")
+		if lastSlash > 0 {
+			parentPath := groupPath[:lastSlash]
+			add(parentPath + "/" + cleanArtifact)
+		}
+	}
+
+	// Pattern 4: artifactId with hyphens removed  (e.g., commons-lang3 → lang3 appended to group)
+	if strings.Contains(artifactID, "-") {
+		parts := strings.Split(artifactID, "-")
+		lastPart := parts[len(parts)-1]
+		add(groupPath + "/" + lastPart)
+	}
+
+	return candidates
+}
+
+// checkMethodsReachability checks if specific methods are reachable using the pre-built index
 func (a *Analyzer) checkMethodsReachability(packageName string, methods []string) bool {
-	for methodID, isReachable := range a.reachableMethods {
-		if !isReachable {
+	for _, className := range a.reachableClasses {
+		if !strings.Contains(className, packageName) {
 			continue
 		}
-
-		// Check if this method belongs to the vulnerable package
-		if node, exists := a.callGraph.Nodes[methodID]; exists {
-			if strings.Contains(node.ClassName, packageName) {
-				// Check if method name matches any affected method
-				for _, affectedMethod := range methods {
-					if strings.Contains(node.MethodName, affectedMethod) ||
-						strings.Contains(methodID, affectedMethod) {
-						return true
-					}
+		// This class belongs to the vulnerable package — check its methods
+		for _, reachableMethod := range a.reachableByClass[className] {
+			for _, affectedMethod := range methods {
+				if strings.Contains(reachableMethod, affectedMethod) {
+					return true
 				}
 			}
 		}
@@ -106,17 +192,11 @@ func (a *Analyzer) checkMethodsReachability(packageName string, methods []string
 	return false
 }
 
-// checkPackageReachability checks if any method from a package is reachable
+// checkPackageReachability checks if any method from a package is reachable using the pre-built index
 func (a *Analyzer) checkPackageReachability(packageName string) bool {
-	for methodID, isReachable := range a.reachableMethods {
-		if !isReachable {
-			continue
-		}
-
-		if node, exists := a.callGraph.Nodes[methodID]; exists {
-			if strings.Contains(node.ClassName, packageName) {
-				return true
-			}
+	for _, className := range a.reachableClasses {
+		if strings.Contains(className, packageName) {
+			return true
 		}
 	}
 	return false

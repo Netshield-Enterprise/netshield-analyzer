@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Netshield-Enterprise/netshield-analyzer/pkg/models"
@@ -15,6 +18,7 @@ import (
 type OSVClient struct {
 	baseURL    string
 	httpClient *http.Client
+	Quiet      bool // suppress per-dependency progress logging
 }
 
 // NewOSVClient creates a new OSV API client
@@ -214,29 +218,153 @@ func (c *OSVClient) extractCVSS(severities []OSVSeverity) float64 {
 	return 0.0
 }
 
-// extractAffectedMethods tries to extract affected methods from vulnerability data
+// extractAffectedMethods tries to extract affected methods from vulnerability data.
+// This is heuristic-based since OSV doesn't always provide structured method-level data.
+// The approach:
+//  1. Check CVE description keywords → map to known vulnerable method names
+//  2. Check the affected package name itself → map well-known libraries to their methods
+//  3. Check database_specific fields for structured data
 func (c *OSVClient) extractAffectedMethods(osv OSVVulnerability) []string {
 	methods := make([]string, 0)
+	seen := make(map[string]bool)
 
-	// Check if details mention specific classes or methods
-	// This is heuristic-based; OSV doesn't always provide this information
+	add := func(m string) {
+		if !seen[m] {
+			seen[m] = true
+			methods = append(methods, m)
+		}
+	}
+
 	details := strings.ToLower(osv.Details + " " + osv.Summary)
 
-	// Look for common patterns like "in the X method" or "X.class"
+	// --- Keyword-based heuristics from CVE description ---
+
+	// JNDI injection
 	if strings.Contains(details, "jndi") {
-		methods = append(methods, "lookup")
-	}
-	if strings.Contains(details, "deserialize") {
-		methods = append(methods, "readObject")
+		add("lookup")
 	}
 
-	// Check database_specific fields
+	// Deserialization (Java native, Jackson, SnakeYAML, etc.)
+	if strings.Contains(details, "deserializ") {
+		add("readObject")
+		add("readResolve")
+		add("readExternal")
+		add("load")
+		add("readValue")
+		add("fromXML")
+		add("unmarshal")
+	}
+
+	// XStream / XML unmarshalling patterns
+	if strings.Contains(details, "unmarshal") || strings.Contains(details, "xstream") {
+		add("fromXML")
+		add("unmarshal")
+	}
+
+	// XML parsing / XXE patterns
+	if strings.Contains(details, "xml") && (strings.Contains(details, "injection") ||
+		strings.Contains(details, "external entit") || strings.Contains(details, "xxe") ||
+		strings.Contains(details, "code execution") || strings.Contains(details, "arbitrary")) {
+		add("fromXML")
+		add("unmarshal")
+		add("parse")
+		add("newSAXParser")
+		add("newDocumentBuilder")
+		add("createXMLStreamReader")
+	}
+
+	// Arbitrary code / remote code execution
+	if strings.Contains(details, "arbitrary code") || strings.Contains(details, "remote code execution") ||
+		strings.Contains(details, "code execution") || strings.Contains(details, "rce") {
+		add("readObject")
+		add("fromXML")
+		add("unmarshal")
+		add("load")
+		add("readValue")
+		add("evaluate")
+		add("invoke")
+	}
+
+	// SSRF patterns
+	if strings.Contains(details, "server-side") && strings.Contains(details, "request") {
+		add("fromXML")
+		add("unmarshal")
+		add("openConnection")
+		add("openStream")
+	}
+
+	// Denial of Service via input processing
+	if strings.Contains(details, "denial of service") && strings.Contains(details, "input") {
+		add("fromXML")
+		add("unmarshal")
+		add("parse")
+		add("load")
+		add("readValue")
+	}
+
+	// YAML processing
+	if strings.Contains(details, "yaml") {
+		add("load")
+		add("loadAll")
+		add("loadAs")
+	}
+
+	// Expression language / template injection
+	if strings.Contains(details, "expression") || strings.Contains(details, "template") ||
+		strings.Contains(details, "spel") || strings.Contains(details, "ognl") {
+		add("evaluate")
+		add("parseExpression")
+		add("getValue")
+	}
+
+	// SQL injection
+	if strings.Contains(details, "sql injection") || strings.Contains(details, "sql inject") {
+		add("executeQuery")
+		add("executeUpdate")
+		add("execute")
+		add("prepareStatement")
+	}
+
+	// --- Package-name-based heuristics (fallback) ---
+	// Well-known libraries have well-known vulnerable entry points.
+	// If the CVE is for this package, these methods are the likely attack surface.
 	for _, affected := range osv.Affected {
+		pkg := strings.ToLower(affected.Package.Name)
+
+		switch {
+		case strings.Contains(pkg, "xstream"):
+			add("fromXML")
+			add("unmarshal")
+		case strings.Contains(pkg, "snakeyaml"):
+			add("load")
+			add("loadAll")
+			add("loadAs")
+		case strings.Contains(pkg, "jackson-databind"):
+			add("readValue")
+			add("readTree")
+			add("enableDefaultTyping")
+		case strings.Contains(pkg, "commons-collections"):
+			add("readObject")
+			add("transform")
+		case strings.Contains(pkg, "log4j"):
+			add("lookup")
+			add("log")
+			add("error")
+			add("info")
+		case strings.Contains(pkg, "spring-expression") || strings.Contains(pkg, "spring-core"):
+			add("parseExpression")
+			add("getValue")
+		case strings.Contains(pkg, "commons-text"):
+			add("replace")
+			add("lookup")
+		}
+
+		// Check database_specific fields for structured affected class data
 		if affected.DatabaseSpecific != nil {
 			if classes, ok := affected.DatabaseSpecific["affected_classes"].([]interface{}); ok {
 				for _, class := range classes {
 					if classStr, ok := class.(string); ok {
-						methods = append(methods, classStr)
+						add(classStr)
 					}
 				}
 			}
@@ -246,23 +374,58 @@ func (c *OSVClient) extractAffectedMethods(osv OSVVulnerability) []string {
 	return methods
 }
 
-// GetVulnerabilitiesForDependencies gets vulnerabilities for all dependencies
+// GetVulnerabilitiesForDependencies gets vulnerabilities for all dependencies concurrently
 func (c *OSVClient) GetVulnerabilitiesForDependencies(dependencies []*models.Dependency) (map[string][]*models.Vulnerability, error) {
 	result := make(map[string][]*models.Vulnerability)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
-	for _, dep := range dependencies {
-		key := fmt.Sprintf("%s:%s:%s", dep.GroupID, dep.ArtifactID, dep.Version)
+	// Semaphore to limit concurrent HTTP requests (avoid overwhelming the API)
+	const maxConcurrent = 10
+	sem := make(chan struct{}, maxConcurrent)
 
-		vulns, err := c.GetVulnerabilities(dep.GroupID, dep.ArtifactID, dep.Version)
-		if err != nil {
-			fmt.Printf("Warning: failed to get vulnerabilities for %s: %v\n", key, err)
-			continue
-		}
+	total := len(dependencies)
+	var completed int64
 
-		if len(vulns) > 0 {
-			result[key] = vulns
-		}
+	if !c.Quiet {
+		fmt.Fprintf(os.Stderr, "  Querying CVE database for %d dependencies...\n", total)
 	}
 
+	for _, dep := range dependencies {
+		wg.Add(1)
+		go func(dep *models.Dependency) {
+			defer wg.Done()
+
+			// Acquire semaphore slot
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			key := fmt.Sprintf("%s:%s:%s", dep.GroupID, dep.ArtifactID, dep.Version)
+
+			vulns, err := c.GetVulnerabilities(dep.GroupID, dep.ArtifactID, dep.Version)
+			done := atomic.AddInt64(&completed, 1)
+			if err != nil {
+				if !c.Quiet {
+					fmt.Fprintf(os.Stderr, "  [%d/%d] Warning: %s: %v\n", done, total, key, err)
+				}
+				return
+			}
+
+			if len(vulns) > 0 {
+				mu.Lock()
+				result[key] = vulns
+				mu.Unlock()
+				if !c.Quiet {
+					fmt.Fprintf(os.Stderr, "  [%d/%d] %s — %d CVEs found\n", done, total, key, len(vulns))
+				}
+			} else {
+				if !c.Quiet {
+					fmt.Fprintf(os.Stderr, "  [%d/%d] %s — clean\n", done, total, key)
+				}
+			}
+		}(dep)
+	}
+
+	wg.Wait()
 	return result, nil
 }

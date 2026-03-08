@@ -28,14 +28,46 @@ var (
 	entryPoints   []string
 	skipCVELookup bool
 	keyStdin      bool
+	quiet         bool
+	noProgress    bool
+	summaryOnly   bool
 )
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "netshield",
+		Use:   "netshield [flags]",
 		Short: "NetShield Real Risk Analysis",
 		Long: `NetShield analyzes Java projects to determine real exploitability of CVEs.
-Stop wasting time on vulnerabilities that don't matter.`,
+Stop wasting time on vulnerabilities that don't matter.
+
+NetShield performs static reachability analysis on your Java project's
+dependency graph to determine which CVEs are actually exploitable
+through your application's code paths.
+
+Examples:
+  # Basic scan with application package filter
+  netshield --packages com.yourcompany.app
+
+  # Scan a specific project path
+  netshield --project /path/to/project --packages com.yourcompany
+
+  # Quiet mode for CI/CD (no progress output)
+  netshield --packages com.yourcompany --quiet
+
+  # Summary only (no individual CVE listing)
+  netshield --packages com.yourcompany --summary-only
+
+  # Minimal CI output (no progress, no CVE details)
+  netshield --packages com.yourcompany --quiet --summary-only
+
+  # Show progress steps but suppress per-dependency log
+  netshield --packages com.yourcompany --no-progress
+
+  # JSON output for programmatic consumption
+  netshield --packages com.yourcompany --format json --quiet
+
+  # Start the web dashboard
+  netshield --serve --port 9090`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			return config.InitResolver(keyStdin)
 		},
@@ -48,6 +80,9 @@ Stop wasting time on vulnerabilities that don't matter.`,
 	rootCmd.PersistentFlags().StringSliceVarP(&entryPoints, "entry-points", "e", []string{}, "Custom entry points in format Package.Class.method(Signature)")
 	rootCmd.PersistentFlags().BoolVar(&skipCVELookup, "skip-cve", false, "Skip CVE lookup (only build call graph)")
 	rootCmd.PersistentFlags().BoolVar(&keyStdin, "key-stdin", false, "Read API key securely from stdin to avoid /proc snooping")
+	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress all progress output (stderr)")
+	rootCmd.PersistentFlags().BoolVar(&noProgress, "no-progress", false, "Suppress per-dependency CVE query log (keep step headers)")
+	rootCmd.PersistentFlags().BoolVar(&summaryOnly, "summary-only", false, "Show executive summary only, omit individual CVE details")
 
 	// Web UI flags
 	rootCmd.Flags().Bool("serve", false, "Start web UI server instead of CLI analysis")
@@ -84,14 +119,23 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 		return runWebServer(port)
 	}
 
-	// Step 1: Parse dependencies (quiet)
+	// Step 1: Parse dependencies
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[1/5] Parsing dependencies...\n")
+	}
 	mavenParser := parser.NewMavenParser(projectPath)
 	depTree, err := mavenParser.ParseDependencies()
 	if err != nil {
 		return fmt.Errorf("failed to parse dependencies: %w", err)
 	}
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "  Found %d dependencies\n", len(depTree.Dependencies))
+	}
 
-	// Step 2: Build call graph (quiet)
+	// Step 2: Build call graph
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[2/5] Building call graph (%d dependencies)...\n", len(depTree.Dependencies))
+	}
 	builder := callgraph.NewBuilder(projectPath)
 
 	// Set application packages if provided
@@ -103,17 +147,30 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to build call graph: %w", err)
 	}
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "  Call graph: %d nodes, %d edges\n", len(cg.Nodes), len(cg.Edges))
+	}
 
-	// Step 3: Find reachable methods (quiet)
+	// Step 3: Find reachable methods
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[3/5] Finding reachable methods...\n")
+	}
 	reachable := builder.FindReachableMethods(cg, entryPoints)
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "  %d reachable methods identified\n", len(reachable))
+	}
 
 	if skipCVELookup {
 		fmt.Println("Skipping CVE lookup (--skip-cve flag set)")
 		return nil
 	}
 
-	// Step 4: Query CVE database (quiet)
+	// Step 4: Query CVE database
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[4/5] Querying CVE database (%d dependencies)...\n", len(depTree.Dependencies))
+	}
 	osvClient := cve.NewOSVClient()
+	osvClient.Quiet = quiet || noProgress
 	vulns, err := osvClient.GetVulnerabilitiesForDependencies(depTree.Dependencies)
 	if err != nil {
 		return fmt.Errorf("failed to query CVE database: %w", err)
@@ -124,13 +181,16 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 		totalVulns += len(v)
 	}
 
-	// Step 5: Perform triage analysis (quiet)
+	// Step 5: Perform triage analysis
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "[5/5] Analyzing reachability...\n")
+	}
 	analyzer := triage.NewAnalyzer(cg, reachable, vulns)
 	results := analyzer.AnalyzeReachability()
 	summary := analyzer.GetSummary(results)
 
 	// Generate report
-	reporter := triage.NewReporter(results, summary)
+	reporter := triage.NewReporter(results, summary, summaryOnly)
 
 	var format triage.OutputFormat
 	switch strings.ToLower(outputFormat) {

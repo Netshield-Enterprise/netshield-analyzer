@@ -12,15 +12,17 @@ import (
 
 // Reporter generates reports from triage results
 type Reporter struct {
-	results []*models.TriageResult
-	summary *TriageSummary
+	results     []*models.TriageResult
+	summary     *TriageSummary
+	summaryOnly bool // omit individual CVE details from report
 }
 
 // NewReporter creates a new reporter
-func NewReporter(results []*models.TriageResult, summary *TriageSummary) *Reporter {
+func NewReporter(results []*models.TriageResult, summary *TriageSummary, summaryOnly bool) *Reporter {
 	return &Reporter{
-		results: results,
-		summary: summary,
+		results:     results,
+		summary:     summary,
+		summaryOnly: summaryOnly,
 	}
 }
 
@@ -174,28 +176,30 @@ func (r *Reporter) generateExecutiveReport(writer io.Writer) error {
 		fmt.Fprintln(writer)
 	}
 
-	// 5️⃣ SECURITY EVIDENCE (Minimal)
-	findingCount := r.summary.Total
-	fmt.Fprintf(writer, "SECURITY EVIDENCE\n")
-	fmt.Fprintln(writer, "────────────────────────────────────────────────────────────────")
-	if findingCount == 1 {
-		if r.summary.Unreachable == 1 {
-			fmt.Fprintln(writer, "1 critical vulnerability detected but unreachable from execution paths.")
+	// 5️⃣ SECURITY EVIDENCE (Minimal) — skip when --summary-only
+	if !r.summaryOnly {
+		findingCount := r.summary.Total
+		fmt.Fprintf(writer, "SECURITY EVIDENCE\n")
+		fmt.Fprintln(writer, "────────────────────────────────────────────────────────────────")
+		if findingCount == 1 {
+			if r.summary.Unreachable == 1 {
+				fmt.Fprintln(writer, "1 critical vulnerability detected but unreachable from execution paths.")
+			} else {
+				fmt.Fprintln(writer, "1 vulnerability detected.")
+			}
 		} else {
-			fmt.Fprintln(writer, "1 vulnerability detected.")
+			if r.summary.Unreachable == findingCount {
+				fmt.Fprintf(writer, "%d vulnerabilities detected but unreachable from execution paths.\n", findingCount)
+			} else {
+				fmt.Fprintf(writer, "%d vulnerabilities detected.\n", findingCount)
+			}
 		}
-	} else {
-		if r.summary.Unreachable == findingCount {
-			fmt.Fprintf(writer, "%d vulnerabilities detected but unreachable from execution paths.\n", findingCount)
-		} else {
-			fmt.Fprintf(writer, "%d vulnerabilities detected.\n", findingCount)
-		}
-	}
-	fmt.Fprintln(writer)
+		fmt.Fprintln(writer)
 
-	sortedResults := r.sortResultsByPriority()
-	for _, result := range sortedResults {
-		r.printExecutiveVulnerability(writer, result)
+		sortedResults := r.sortResultsByPriority()
+		for _, result := range sortedResults {
+			r.printExecutiveVulnerability(writer, result)
+		}
 	}
 
 	// 6️⃣ ACTIVE PROTECTION

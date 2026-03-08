@@ -1,8 +1,9 @@
 package models
 
 type CallGraph struct {
-	Nodes map[string]*MethodNode `json:"nodes"`
-	Edges []*CallEdge            `json:"edges"`
+	Nodes   map[string]*MethodNode `json:"nodes"`
+	Edges   []*CallEdge            `json:"edges"`
+	AdjList map[string][]string    `json:"-"` // adjacency list for O(V+E) DFS
 }
 
 type MethodNode struct {
@@ -41,8 +42,9 @@ const (
 
 func NewCallGraph() *CallGraph {
 	return &CallGraph{
-		Nodes: make(map[string]*MethodNode),
-		Edges: make([]*CallEdge, 0),
+		Nodes:   make(map[string]*MethodNode),
+		Edges:   make([]*CallEdge, 0),
+		AdjList: make(map[string][]string),
 	}
 }
 
@@ -56,6 +58,7 @@ func (cg *CallGraph) AddEdge(from, to string, callType CallType) {
 		To:   to,
 		Type: callType,
 	})
+	cg.AdjList[from] = append(cg.AdjList[from], to)
 }
 
 func GetMethodID(className, methodName, signature string) string {

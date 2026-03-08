@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Netshield-Enterprise/netshield-analyzer/internal/bytecode"
 	"github.com/Netshield-Enterprise/netshield-analyzer/pkg/models"
@@ -39,7 +40,7 @@ func (b *Builder) SetApplicationPackages(packages []string) {
 func (b *Builder) BuildCallGraph(dependencies []*models.Dependency) (*models.CallGraph, error) {
 	cg := models.NewCallGraph()
 
-	// First, analyze application code
+	// First, analyze application code (sequential — usually just 1-2 JARs)
 	appJARs, err := b.findApplicationJARs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to find application JARs: %v\n", err)
@@ -55,20 +56,48 @@ func (b *Builder) BuildCallGraph(dependencies []*models.Dependency) (*models.Cal
 		b.registerClasses(classes, false)
 	}
 
-	// Then, analyze dependencies
+	// Then, analyze dependencies in parallel
+	type jarResult struct {
+		classes []*bytecode.ClassFile
+		err     error
+		jarPath string
+	}
+
+	const maxWorkers = 10
+	sem := make(chan struct{}, maxWorkers)
+	var wg sync.WaitGroup
+	resultsCh := make(chan jarResult, len(dependencies))
+
 	for _, dep := range dependencies {
 		if dep.JARPath == "" {
 			continue
 		}
 
-		analyzer := bytecode.NewJARAnalyzer(dep.JARPath)
-		classes, err := analyzer.AnalyzeJAR()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to analyze JAR %s: %v\n", dep.JARPath, err)
+		wg.Add(1)
+		go func(jarPath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			analyzer := bytecode.NewJARAnalyzer(jarPath)
+			classes, err := analyzer.AnalyzeJAR()
+			resultsCh <- jarResult{classes: classes, err: err, jarPath: jarPath}
+		}(dep.JARPath)
+	}
+
+	// Close results channel when all workers finish
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	// Register classes serially (class registry is not concurrent-safe)
+	for res := range resultsCh {
+		if res.err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to analyze JAR %s: %v\n", res.jarPath, res.err)
 			continue
 		}
-
-		b.registerClasses(classes, true)
+		b.registerClasses(res.classes, true)
 	}
 
 	// Now build call graph nodes and edges
@@ -290,18 +319,26 @@ func (b *Builder) FindReachableMethods(cg *models.CallGraph, entryPoints []strin
 }
 
 // dfsReachability performs depth-first search to find reachable methods
+// Uses adjacency list for O(V+E) traversal instead of scanning all edges
 func (b *Builder) dfsReachability(cg *models.CallGraph, methodID string, reachable, visited map[string]bool) {
-	if visited[methodID] {
-		return
-	}
+	stack := []string{methodID}
 
-	visited[methodID] = true
-	reachable[methodID] = true
+	for len(stack) > 0 {
+		// Pop
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
 
-	// Follow all outgoing edges
-	for _, edge := range cg.Edges {
-		if edge.From == methodID {
-			b.dfsReachability(cg, edge.To, reachable, visited)
+		if visited[current] {
+			continue
+		}
+		visited[current] = true
+		reachable[current] = true
+
+		// Follow outgoing edges via adjacency list
+		for _, neighbor := range cg.AdjList[current] {
+			if !visited[neighbor] {
+				stack = append(stack, neighbor)
+			}
 		}
 	}
 }
