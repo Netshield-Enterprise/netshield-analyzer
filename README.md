@@ -2,9 +2,43 @@
 
 **Reachability-based vulnerability analysis for Java applications**
 
-NetShield determines whether vulnerabilities in your dependencies are actually exploitable by analyzing bytecode call graphs. It answers one question: *Can this CVE be triggered by my application code?*
+---
 
-Most vulnerability scanners report every CVE in your dependency tree. NetShield tells you which ones actually matter.
+## Why NetShield Exists
+
+Traditional Software Composition Analysis tools answer one question:
+
+> *"Does a vulnerable version exist in the dependency tree?"*
+
+That produces large volumes of alerts but does not answer the question that determines risk:
+
+> *"Can the application actually execute the vulnerable code?"*
+
+NetShield performs static reachability analysis on Java bytecode to determine whether vulnerable methods are reachable from application entry points.
+
+The result is a triage classification:
+
+- **REACHABLE** — Vulnerable method is called by your application → fix immediately
+- **UNREACHABLE** — Vulnerable code exists but cannot be triggered → deprioritize
+- **UNKNOWN** — Analysis incomplete → manual review recommended
+
+---
+
+## Real-World Benchmark
+
+NetShield was tested against [OWASP WebGoat](https://github.com/WebGoat/WebGoat):
+
+| Metric | Value |
+|--------|-------|
+| Dependencies scanned | 203 |
+| Call graph nodes | 158,410 |
+| Call graph edges | 3,059,079 |
+| Reachable methods | 76,710 |
+| CVEs detected | 39 |
+| Reachable | 36 |
+| Unreachable | 2 |
+| Unknown | 1 |
+| Analysis time | 29 seconds |
 
 ---
 
@@ -51,24 +85,7 @@ NetShield will:
 2. Parse bytecode from all dependency JARs (in parallel)
 3. Build a method-level call graph
 4. Query the OSV vulnerability database
-5. Classify each CVE as **Reachable**, **Unreachable**, or **Unknown**
-
----
-
-## What Problem This Solves
-
-| Traditional SCA | NetShield |
-|---|---|
-| "You have 39 CVEs" | "You have 36 **reachable** CVEs, 2 unreachable, 1 unknown" |
-| Every CVE treated equally | Risk prioritized by exploitability |
-| Alert fatigue, wasted patching | Fix what matters, defer what doesn't |
-| Binary pass/fail | Graduated: **DO NOT SHIP** / **SHIP WITH CAUTION** / **SAFE TO SHIP** |
-
-### Reachability Classification
-
-- **REACHABLE** — Vulnerable method is called by your application code → fix immediately
-- **UNREACHABLE** — Vulnerable code exists but cannot be triggered → deprioritize
-- **UNKNOWN** — Package is used but specific vulnerable methods not identified → review
+5. Classify each CVE as Reachable, Unreachable, or Unknown
 
 ---
 
@@ -113,52 +130,6 @@ netshield-analyzer --serve --port 9090
 
 ---
 
-## Example Output
-
-### Executive Report (default)
-
-```
-════════════════════════════════════════════════════════════════
-                   NetShield Release Analysis
-════════════════════════════════════════════════════════════════
-
-EXECUTIVE SUMMARY
-────────────────────────────────────────────────────────────────
-Critical exploitable vulnerabilities detected (36 reachable).
-Release is blocked until patches are applied.
-
-RELEASE STATUS
-✗ DO NOT SHIP
-
-BUSINESS RISK
-────────────────────────────────────────────────────────────────
-Exploit Risk         HIGH
-Production Exposure  ACTIVE RISK
-Patch Urgency        IMMEDIATE
-Engineering Impact   Release Blocking
-
-SUPPLY CHAIN TRUST SCORE
-────────────────────────────────────────────────────────────────
-55 / 100  (Poor)
-
-SECURITY EVIDENCE
-────────────────────────────────────────────────────────────────
-39 vulnerabilities detected.
-
-CVE: GHSA-hvv8-336g-rx3m
-Package: com.thoughtworks.xstream:xstream
-Severity: CRITICAL
-Reachability: REACHABLE
-Reason: Vulnerable method is called by application
-
-ACTIVE PROTECTION
-────────────────────────────────────────────────────────────────
-If future code makes any vulnerability reachable, NetShield will
-fail the build automatically.
-```
-
----
-
 ## CI/CD Integration
 
 NetShield uses exit codes designed for pipeline integration:
@@ -173,8 +144,7 @@ NetShield uses exit codes designed for pipeline integration:
 
 ```yaml
 - name: Security Gate
-  run: |
-    netshield-analyzer --packages com.yourcompany --format core --quiet
+  run: netshield-analyzer --packages com.yourcompany --format core --quiet
 ```
 
 ### GitLab CI
@@ -196,36 +166,51 @@ sh 'netshield-analyzer --packages com.yourcompany --format core --quiet'
 ## How It Works
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│  Maven Project   │───▶│  Dependency Tree  │───▶│  JAR Download   │
-│    pom.xml       │    │  (transitive)     │    │  (parallel)     │
-└─────────────────┘    └──────────────────┘    └────────┬────────┘
-                                                        │
-┌─────────────────┐    ┌──────────────────┐    ┌────────▼────────┐
-│  Risk Triage    │◀───│  OSV CVE Lookup  │◀───│  Call Graph     │
-│  Classification │    │  (concurrent)    │    │  (bytecode DFS) │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+┌─────────────────┐    ┌──────────────────┐    ┌───────────────────────┐
+│  Maven Project   │───▶│  Dependency Tree  │───▶│  Parallel JAR         │
+│    pom.xml       │    │  (transitive)     │    │  bytecode parsing     │
+└─────────────────┘    └──────────────────┘    │  (10 workers)         │
+                                                └───────────┬───────────┘
+                                                            │
+┌─────────────────┐    ┌──────────────────┐    ┌────────────▼──────────┐
+│  Risk Triage    │◀───│  OSV CVE Lookup  │◀───│  Call Graph           │
+│  + Trust Score  │    │  (10 concurrent) │    │  (bytecode DFS)       │
+└─────────────────┘    └──────────────────┘    └───────────────────────┘
 ```
 
 1. **Dependency Resolution** — Parses `pom.xml` and resolves the full transitive dependency tree
 2. **JAR Analysis** — Downloads and parses bytecode from all JARs using a 10-worker parallel pool
-3. **Call Graph Construction** — Builds method-level call graphs with virtual dispatch resolution (158K+ nodes, 3M+ edges for large projects)
-4. **CVE Lookup** — Queries the OSV API concurrently for known vulnerabilities across all dependencies
-5. **Reachability Analysis** — O(V+E) depth-first search from application entry points to determine which vulnerable methods are actually callable
-6. **Risk Classification** — Categorizes each finding as Reachable, Unreachable, or Unknown with business risk scoring
+3. **Call Graph Construction** — Builds method-level call graphs with virtual dispatch resolution
+4. **CVE Lookup** — Queries the OSV API concurrently for known vulnerabilities
+5. **Reachability Analysis** — O(V+E) depth-first search from application entry points
+6. **Risk Classification** — Categorizes each finding with business risk scoring
 
 ---
 
-## Performance
+## Limitations
 
-NetShield is optimized for speed with parallel JAR parsing, concurrent CVE queries, and an adjacency-list-based DFS.
+NetShield uses static bytecode analysis and cannot fully resolve:
 
-| Project Size | Dependencies | Typical Time |
-|--------------|:------------:|:------------:|
-| Small        | < 50         | ~5 seconds   |
-| Medium       | 50–200       | ~15 seconds  |
-| Large (e.g., WebGoat) | 200+ | ~30 seconds |
-| Enterprise   | 500+         | ~1–2 minutes |
+- **Reflection** — Methods invoked via reflection are marked as Unknown
+- **Dynamic Loading** — Dynamically loaded classes may not be analyzed
+- **Runtime Proxies** — CGLIB/ByteBuddy-generated methods are not visible in bytecode
+- **JNI** — Native code execution paths are not analyzed
+- **Build Tool** — Currently supports Maven only (Gradle support planned)
+- **Language** — Java bytecode only (Kotlin/Scala supported if compiled to JVM bytecode)
+
+These cases are reported as `UNKNOWN` to avoid false negatives.
+
+---
+
+## Roadmap
+
+Planned improvements:
+
+- Additional CVE data sources (NVD, GitHub Advisory Database)
+- Deeper Spring framework entry point discovery
+- Reflection resolution improvements
+- Gradle build support
+- SARIF output format for GitHub Security
 
 ---
 
@@ -246,30 +231,6 @@ Flags:
       --key-stdin              Read API key securely from stdin
   -h, --help                   Help for netshield
 ```
-
----
-
-## Dashboard & Monitoring
-
-NetShield includes a built-in web dashboard and can upload results to a remote server for historical tracking:
-
-```bash
-# Start the local web dashboard
-netshield-analyzer --serve --port 8080
-
-# Scan and upload results to NetShield dashboard
-netshield-analyzer monitor --packages com.yourcompany
-```
-
----
-
-## Limitations
-
-1. **Reflection** — Methods invoked via reflection are marked as **Unknown**
-2. **Dynamic Loading** — Dynamically loaded classes may not be analyzed
-3. **Build Tool** — Currently supports Maven only (Gradle support planned)
-4. **Language** — Java bytecode only (Kotlin/Scala supported if compiled to JVM bytecode)
-5. **Accuracy** — Call graph construction is best-effort; complex frameworks may reduce precision
 
 ---
 
@@ -300,12 +261,12 @@ NetShield integrates directly into your IDE:
 
 ## License
 
-NetShield is dual-licensed:
+NetShield Analyzer is dual licensed.
 
-- **AGPL-3.0** — Free for open source projects ([LICENSE-AGPL](LICENSE-AGPL))
-- **Commercial** — For proprietary use ([LICENSE-COMMERCIAL](LICENSE-COMMERCIAL))
+- **AGPL-3.0** — Open source community version ([LICENSE](LICENSE))
+- **Commercial** — For organizations that cannot comply with AGPL ([LICENSE-COMMERCIAL](LICENSE-COMMERCIAL))
 
-For commercial licensing: licensing@net-shield.net
+See [LICENSING.md](LICENSING.md) for details.
 
 ---
 

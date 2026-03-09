@@ -1,3 +1,10 @@
+// Copyright (c) 2026 NetShield
+//
+// This file is part of NetShield Analyzer.
+//
+// NetShield Analyzer is licensed under the GNU Affero General Public
+// License v3.0. See the LICENSE file for details.
+
 // Package database provides SQLite storage for scan history and vulnerability trends.
 package database
 

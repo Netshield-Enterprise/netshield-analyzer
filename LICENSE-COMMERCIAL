@@ -29,8 +29,14 @@ You may not:
 
 a) Sublicense, rent, lease, or lend the Software
 b) Remove or alter any copyright, trademark, or proprietary notices
-c) Reverse engineer, decompile, or disassemble the Software (except as permitted by law)
-d) Use the Software to create competing products
+c) Reverse engineer, decompile, or disassemble distributed commercial binaries
+   of the Software (except as permitted by applicable law). This restriction
+   applies only to binaries provided under this Commercial License. The open
+   source version distributed under AGPL-3.0 remains subject to the terms of
+   that license.
+d) Redistribute the Software, modified or unmodified, as part of a vulnerability
+   scanning or security analysis product that competes with NetShield without
+   written permission from NetShield
 
 3. OWNERSHIP
 
@@ -66,7 +72,7 @@ Agreement.
 8. GOVERNING LAW
 
 This Agreement shall be governed by and construed in accordance with the laws of
-[Your Jurisdiction], without regard to its conflict of law provisions.
+Your Jurisdiction, without regard to its conflict of law provisions.
 
 ---
 
