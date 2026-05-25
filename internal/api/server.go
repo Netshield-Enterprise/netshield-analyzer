@@ -119,7 +119,7 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Perform triage analysis
-	analyzer := triage.NewAnalyzer(cg, reachable, vulns)
+	analyzer := triage.NewAnalyzer(cg, reachable, vulns, depTree.Dependencies)
 	results := analyzer.AnalyzeReachability()
 	summary := analyzer.GetSummary(results)
 

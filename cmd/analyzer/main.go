@@ -144,6 +144,7 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[2/5] Building call graph (%d dependencies)...\n", len(depTree.Dependencies))
 	}
 	builder := callgraph.NewBuilder(projectPath)
+	builder.Quiet = quiet
 
 	// Set application packages if provided
 	if len(appPackages) > 0 {
@@ -192,7 +193,7 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "[5/5] Analyzing reachability...\n")
 	}
-	analyzer := triage.NewAnalyzer(cg, reachable, vulns)
+	analyzer := triage.NewAnalyzer(cg, reachable, vulns, depTree.Dependencies)
 	results := analyzer.AnalyzeReachability()
 	summary := analyzer.GetSummary(results)
 
@@ -303,6 +304,7 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 	}
 
 	builder := callgraph.NewBuilder(projectPath)
+	builder.Quiet = quiet
 	if len(appPackages) > 0 {
 		builder.SetApplicationPackages(appPackages)
 	}
@@ -319,7 +321,7 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cve lookup failed: %w", err)
 	}
 
-	analyzer := triage.NewAnalyzer(cg, reachable, vulns)
+	analyzer := triage.NewAnalyzer(cg, reachable, vulns, depTree.Dependencies)
 	results := analyzer.AnalyzeReachability()
 	summary := analyzer.GetSummary(results)
 

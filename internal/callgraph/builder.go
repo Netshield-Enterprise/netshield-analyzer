@@ -25,6 +25,7 @@ type Builder struct {
 	classHierarchy map[string][]string
 	classRegistry  map[string]*bytecode.ClassFile
 	isExternalMap  map[string]bool
+	Quiet          bool
 }
 
 // NewBuilder creates a new call graph builder
@@ -35,6 +36,7 @@ func NewBuilder(projectPath string) *Builder {
 		classHierarchy: make(map[string][]string),
 		classRegistry:  make(map[string]*bytecode.ClassFile),
 		isExternalMap:  make(map[string]bool),
+		Quiet:          false,
 	}
 }
 
@@ -50,7 +52,9 @@ func (b *Builder) BuildCallGraph(dependencies []*models.Dependency) (*models.Cal
 	// First, analyze application code (sequential — usually just 1-2 JARs)
 	appJARs, err := b.findApplicationJARs()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to find application JARs: %v\n", err)
+		if !b.Quiet {
+			fmt.Fprintf(os.Stderr, "Warning: failed to find application JARs: %v\n", err)
+		}
 	}
 
 	for _, jarPath := range appJARs {
@@ -75,8 +79,10 @@ func (b *Builder) BuildCallGraph(dependencies []*models.Dependency) (*models.Cal
 	var wg sync.WaitGroup
 	resultsCh := make(chan jarResult, len(dependencies))
 
+	var skippedDeps []string
 	for _, dep := range dependencies {
 		if dep.JARPath == "" {
+			skippedDeps = append(skippedDeps, fmt.Sprintf("%s:%s:%s", dep.GroupID, dep.ArtifactID, dep.Version))
 			continue
 		}
 
@@ -90,6 +96,10 @@ func (b *Builder) BuildCallGraph(dependencies []*models.Dependency) (*models.Cal
 			classes, err := analyzer.AnalyzeJAR()
 			resultsCh <- jarResult{classes: classes, err: err, jarPath: jarPath}
 		}(dep.JARPath)
+	}
+
+	if len(skippedDeps) > 0 && !b.Quiet {
+		fmt.Fprintf(os.Stderr, "  Warning: %d dependencies skipped from call graph (JAR paths empty/not found). Reachability for these will be UNKNOWN.\n", len(skippedDeps))
 	}
 
 	// Close results channel when all workers finish
