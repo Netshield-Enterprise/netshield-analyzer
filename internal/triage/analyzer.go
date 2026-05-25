@@ -19,6 +19,7 @@ type Analyzer struct {
 	callGraph        *models.CallGraph
 	reachableMethods map[string]bool
 	vulnerabilities  map[string][]*models.Vulnerability
+	analyzedDeps     map[string]bool // maps "groupId:artifactId:version" -> true if JARPath != ""
 
 	// Pre-built indexes for fast lookups
 	// reachableByClass maps className → []methodName for all reachable methods
@@ -28,7 +29,7 @@ type Analyzer struct {
 }
 
 // NewAnalyzer creates a new triage analyzer with pre-built indexes
-func NewAnalyzer(cg *models.CallGraph, reachable map[string]bool, vulns map[string][]*models.Vulnerability) *Analyzer {
+func NewAnalyzer(cg *models.CallGraph, reachable map[string]bool, vulns map[string][]*models.Vulnerability, dependencies []*models.Dependency) *Analyzer {
 	// Build the class→methods index from reachable methods
 	byClass := make(map[string][]string)
 	for methodID, isReachable := range reachable {
@@ -45,10 +46,19 @@ func NewAnalyzer(cg *models.CallGraph, reachable map[string]bool, vulns map[stri
 		classes = append(classes, cn)
 	}
 
+	analyzedDeps := make(map[string]bool)
+	for _, dep := range dependencies {
+		key := fmt.Sprintf("%s:%s:%s", dep.GroupID, dep.ArtifactID, dep.Version)
+		if dep.JARPath != "" {
+			analyzedDeps[key] = true
+		}
+	}
+
 	return &Analyzer{
 		callGraph:        cg,
 		reachableMethods: reachable,
 		vulnerabilities:  vulns,
+		analyzedDeps:     analyzedDeps,
 		reachableByClass: byClass,
 		reachableClasses: classes,
 	}
@@ -73,6 +83,14 @@ func (a *Analyzer) analyzeVulnerability(depKey string, vuln *models.Vulnerabilit
 	result := &models.TriageResult{
 		Vulnerability: vuln,
 		Status:        models.StatusUnknown,
+	}
+
+	// Check if dependency bytecode was actually analyzed (JAR was located)
+	if !a.analyzedDeps[depKey] {
+		result.Status = models.StatusUnknown
+		result.Reason = "Dependency bytecode was not analyzed (JAR could not be located)"
+		result.Recommendation = "Manual review required: verify if this package is used in application execution paths"
+		return result
 	}
 
 	// Extract package name from dependency key (format: groupId:artifactId:version)
