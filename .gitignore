@@ -42,3 +42,6 @@ CI_CD_EXIT_CODES.md
 *.Identifier
 .netshield/
 monitor.log
+
+# Java build directories
+target/
