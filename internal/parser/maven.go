@@ -100,6 +100,7 @@ type Dependency struct {
 	ArtifactID string `xml:"artifactId"`
 	Version    string `xml:"version"`
 	Scope      string `xml:"scope"`
+	Classifier string `xml:"classifier"`
 }
 
 // ParseDependencies extracts the dependency tree from a Maven project
@@ -166,19 +167,29 @@ func (mp *MavenParser) parseMavenTreeOutput(output string) (*models.DependencyTr
 
 	// Regex to match dependency lines like:
 	// [INFO] +- org.springframework.boot:spring-boot-starter-web:jar:2.5.0:compile
-	depRegex := regexp.MustCompile(`[\+\-\\\|]\s+([^:]+):([^:]+):([^:]+):([^:]+):([^\s]+)`)
+	// or with classifier:
+	// [INFO] +- com.querydsl:querydsl-jpa:jar:jakarta:5.0.0:compile
+	depRegex := regexp.MustCompile(`[\+\-\\\|]\s+([^:]+):([^:]+):([^:]+):([^:]+)(?::([^:]+))?:([^\s]+)`)
 
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	for scanner.Scan() {
 		line := scanner.Text()
 		
 		matches := depRegex.FindStringSubmatch(line)
-		if len(matches) == 6 {
+		if len(matches) >= 6 {
 			dep := &models.Dependency{
 				GroupID:    matches[1],
 				ArtifactID: matches[2],
-				Version:    matches[4],
-				Scope:      matches[5],
+			}
+			if matches[5] == "" {
+				// No classifier: group:artifact:type:version:scope
+				dep.Version = matches[4]
+				dep.Scope = matches[6]
+			} else {
+				// Has classifier: group:artifact:type:classifier:version:scope
+				dep.Classifier = matches[4]
+				dep.Version = matches[5]
+				dep.Scope = matches[6]
 			}
 			
 			// Try to locate the JAR file in local Maven repository
@@ -203,6 +214,7 @@ func (mp *MavenParser) parseDependenciesFromPOM(pom *POM) (*models.DependencyTre
 			ArtifactID: resolveValue(dep.ArtifactID, pom),
 			Version:    resolveValue(dep.Version, pom),
 			Scope:      resolveValue(dep.Scope, pom),
+			Classifier: resolveValue(dep.Classifier, pom),
 		}
 		
 		modelDep.JARPath = mp.findJARInLocalRepo(modelDep)
@@ -221,12 +233,18 @@ func (mp *MavenParser) findJARInLocalRepo(dep *models.Dependency) string {
 	// Convert groupId to path (e.g., org.springframework -> org/springframework)
 	groupPath := strings.ReplaceAll(dep.GroupID, ".", string(filepath.Separator))
 	
+	jarFileName := dep.ArtifactID + "-" + dep.Version
+	if dep.Classifier != "" {
+		jarFileName += "-" + dep.Classifier
+	}
+	jarFileName += ".jar"
+
 	jarPath := filepath.Join(
 		mp.localRepoPath,
 		groupPath,
 		dep.ArtifactID,
 		dep.Version,
-		fmt.Sprintf("%s-%s.jar", dep.ArtifactID, dep.Version),
+		jarFileName,
 	)
 
 	// Check if file exists

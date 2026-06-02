@@ -12,6 +12,7 @@ type Dependency struct {
 	ArtifactID string `json:"artifact_id"`
 	Version    string `json:"version"`
 	Scope      string `json:"scope"`
+	Classifier string `json:"classifier"`
 	JARPath    string `json:"jar_path"`
 }
 
