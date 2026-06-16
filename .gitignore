@@ -45,3 +45,4 @@ monitor.log
 
 # Java build directories
 target/
+.txt
