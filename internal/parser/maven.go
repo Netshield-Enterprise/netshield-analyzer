@@ -57,6 +57,7 @@ func (p *Properties) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 type MavenParser struct {
 	projectPath   string
 	localRepoPath string
+	Debug         bool
 }
 
 // NewMavenParser creates a new Maven parser
@@ -67,15 +68,30 @@ func NewMavenParser(projectPath string) *MavenParser {
 	}
 }
 
+// debugLog prints debug information when Debug mode is enabled
+func (mp *MavenParser) debugLog(format string, args ...interface{}) {
+	if mp.Debug {
+		fmt.Fprintf(os.Stderr, "[DEBUG] "+format+"\n", args...)
+	}
+}
+
+// DependencyManagementEntry represents a managed dependency version
+type DependencyManagementEntry struct {
+	GroupID    string `xml:"groupId"`
+	ArtifactID string `xml:"artifactId"`
+	Version    string `xml:"version"`
+}
+
 // POM represents a simplified Maven POM structure
 type POM struct {
-	XMLName      xml.Name     `xml:"project"`
-	Parent       Parent       `xml:"parent"`
-	GroupID      string       `xml:"groupId"`
-	ArtifactID   string       `xml:"artifactId"`
-	Version      string       `xml:"version"`
-	Dependencies []Dependency `xml:"dependencies>dependency"`
-	Properties   Properties   `xml:"properties"`
+	XMLName              xml.Name                 `xml:"project"`
+	Parent               Parent                   `xml:"parent"`
+	GroupID              string                   `xml:"groupId"`
+	ArtifactID           string                   `xml:"artifactId"`
+	Version              string                   `xml:"version"`
+	Dependencies         []Dependency             `xml:"dependencies>dependency"`
+	Properties           Properties               `xml:"properties"`
+	DependencyManagement []DependencyManagementEntry `xml:"dependencyManagement>dependencies>dependency"`
 }
 
 // GetEffectiveGroupID returns GroupID or falls back to Parent GroupID
@@ -126,7 +142,55 @@ func (mp *MavenParser) ParseDependencies() (*models.DependencyTree, error) {
 		return mp.parseDependenciesFromPOM(pom)
 	}
 
+	// Resolve missing JARs by running mvn dependency:resolve
+	// This downloads any JARs that aren't in the local cache yet
+	mp.resolveMissingJARs(deps)
+
 	return deps, nil
+}
+
+// resolveMissingJARs runs mvn dependency:resolve to download JARs that aren't cached locally
+func (mp *MavenParser) resolveMissingJARs(deps *models.DependencyTree) {
+	// Count how many JARs are missing
+	missing := 0
+	for _, dep := range deps.Dependencies {
+		if dep.JARPath == "" {
+			missing++
+		}
+	}
+	if missing == 0 {
+		return
+	}
+
+	mp.debugLog("%d JARs missing from local cache, running mvn dependency:resolve...", missing)
+
+	mavenBin, err := mp.findMavenBinary()
+	if err != nil {
+		mp.debugLog("Cannot resolve missing JARs: %v", err)
+		return
+	}
+
+	// Run mvn dependency:resolve to download all JARs
+	cmd := exec.Command(mavenBin, "dependency:resolve", "-DincludeScope=compile,runtime")
+	cmd.Dir = filepath.Clean(mp.projectPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		mp.debugLog("mvn dependency:resolve failed: %v", err)
+		mp.debugLog("Output: %s", truncate(string(output), 1000))
+		return
+	}
+
+	mp.debugLog("mvn dependency:resolve completed, re-resolving JAR paths...")
+
+	// Re-resolve JAR paths for dependencies that were missing
+	for _, dep := range deps.Dependencies {
+		if dep.JARPath == "" {
+			dep.JARPath = mp.findJARInLocalRepo(dep)
+			if dep.JARPath != "" {
+				mp.debugLog("Resolved JAR for %s:%s:%s -> %s", dep.GroupID, dep.ArtifactID, dep.Version, dep.JARPath)
+			}
+		}
+	}
 }
 
 // parsePOM parses the pom.xml file
@@ -144,19 +208,69 @@ func (mp *MavenParser) parsePOM(pomPath string) (*POM, error) {
 	return &pom, nil
 }
 
-// getDependencyTreeFromMaven uses mvn dependency:tree to get full dependency graph
-func (mp *MavenParser) getDependencyTreeFromMaven() (*models.DependencyTree, error) {
-	// Securely execute the Maven command without a shell
-	// mp.projectPath is used as Dir, which is safe, and arguments are passed cleanly
-	cmd := exec.Command("mvn", "dependency:tree", "-DoutputType=text")
-	cmd.Dir = filepath.Clean(mp.projectPath)
-	
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("mvn command failed: %w, output: %s", err, string(output))
+// findMavenBinary locates the Maven executable, preferring mvnw if available.
+// Returns the command name and any error if neither mvnw nor mvn is found.
+func (mp *MavenParser) findMavenBinary() (string, error) {
+	// Check for Maven wrapper in project directory (cross-platform)
+	for _, wrapper := range []string{"mvnw", "mvnw.cmd"} {
+		wrapperPath := filepath.Join(mp.projectPath, wrapper)
+		if info, err := os.Stat(wrapperPath); err == nil && !info.IsDir() {
+			// On Unix, ensure mvnw is executable
+			if wrapper == "mvnw" {
+				if err := os.Chmod(wrapperPath, info.Mode()|0111); err != nil {
+					mp.debugLog("Could not chmod +x %s: %v", wrapperPath, err)
+				}
+			}
+			// Return absolute path so exec.Command can find it
+			absPath, err := filepath.Abs(wrapperPath)
+			if err != nil {
+				absPath = wrapperPath
+			}
+			mp.debugLog("Using Maven wrapper: %s", absPath)
+			return absPath, nil
+		}
 	}
 
+	// Fall back to system mvn
+	if _, err := exec.LookPath("mvn"); err == nil {
+		mp.debugLog("Using system Maven: mvn")
+		return "mvn", nil
+	}
+
+	return "", fmt.Errorf("no Maven found: neither mvnw wrapper in %s nor mvn on PATH", mp.projectPath)
+}
+
+// getDependencyTreeFromMaven uses mvn dependency:tree to get full dependency graph
+func (mp *MavenParser) getDependencyTreeFromMaven() (*models.DependencyTree, error) {
+	mavenBin, err := mp.findMavenBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	mp.debugLog("Running dependency tree with: %s", mavenBin)
+
+	// Securely execute the Maven command without a shell
+	// mp.projectPath is used as Dir, which is safe, and arguments are passed cleanly
+	cmd := exec.Command(mavenBin, "dependency:tree", "-DoutputType=text")
+	cmd.Dir = filepath.Clean(mp.projectPath)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		mp.debugLog("Maven command failed: %v", err)
+		mp.debugLog("Maven output (last 2000 chars): %s", truncate(string(output), 2000))
+		return nil, fmt.Errorf("mvn command failed: %w, output: %s", err, truncate(string(output), 500))
+	}
+
+	mp.debugLog("Maven dependency tree output (%d bytes)", len(output))
 	return mp.parseMavenTreeOutput(string(output))
+}
+
+// truncate shortens a string to maxLen characters, appending "..." if truncated
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[len(s)-maxLen:] + "..."
 }
 
 // parseMavenTreeOutput parses the output of mvn dependency:tree
@@ -165,40 +279,78 @@ func (mp *MavenParser) parseMavenTreeOutput(output string) (*models.DependencyTr
 		Dependencies: make([]*models.Dependency, 0),
 	}
 
-	// Regex to match dependency lines like:
-	// [INFO] +- org.springframework.boot:spring-boot-starter-web:jar:2.5.0:compile
-	// or with classifier:
-	// [INFO] +- com.querydsl:querydsl-jpa:jar:jakarta:5.0.0:compile
-	depRegex := regexp.MustCompile(`[\+\-\\\|]\s+([^:]+):([^:]+):([^:]+):([^:]+)(?::([^:]+))?:([^\s]+)`)
+	// Regex to match dependency lines from mvn dependency:tree output.
+	// Handles formats like:
+	//   [INFO] +- org.springframework.boot:spring-boot-starter-web:jar:2.5.0:compile
+	//   [INFO] |  \- com.querydsl:querydsl-jpa:jar:jakarta:5.0.0:compile
+	//   [INFO] +- org.apache.commons:commons-lang3:3.14.0 (no classifier, no type)
+	//   [INFO] +- com.thoughtworks.xstream:xstream:1.4.5
+	//
+	// The pattern handles optional type and classifier fields which Maven may or may not include.
+	depRegex := regexp.MustCompile(`[\+\-\\\|]\s+([^:\s]+):([^:\s]+):([^:\s]+)(?::([^:\s]+))?(?::([^:\s]+))?(?::([^\s]+))?`)
 
 	scanner := bufio.NewScanner(strings.NewReader(output))
+	lineNum := 0
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+		lineNum++
+
 		matches := depRegex.FindStringSubmatch(line)
-		if len(matches) >= 6 {
-			dep := &models.Dependency{
-				GroupID:    matches[1],
-				ArtifactID: matches[2],
-			}
-			if matches[5] == "" {
-				// No classifier: group:artifact:type:version:scope
-				dep.Version = matches[4]
-				dep.Scope = matches[6]
-			} else {
-				// Has classifier: group:artifact:type:classifier:version:scope
-				dep.Classifier = matches[4]
-				dep.Version = matches[5]
-				dep.Scope = matches[6]
-			}
-			
-			// Try to locate the JAR file in local Maven repository
-			dep.JARPath = mp.findJARInLocalRepo(dep)
-			
-			tree.Dependencies = append(tree.Dependencies, dep)
+		if len(matches) < 4 {
+			mp.debugLog("Line %d: no match: %s", lineNum, line)
+			continue
 		}
+
+		dep := &models.Dependency{
+			GroupID:    matches[1],
+			ArtifactID: matches[2],
+		}
+
+		// Maven tree output formats:
+		//   group:artifact:type:version:scope                    (standard)
+		//   group:artifact:type:classifier:version:scope         (with classifier)
+		//   group:artifact:version                                (minimal)
+		// FindStringSubmatch always returns all capture groups (empty if unmatched).
+		// Determine format by checking which groups are non-empty.
+		switch {
+		case matches[6] != "":
+			// group:artifact:type:classifier:version:scope
+			dep.Classifier = matches[4]
+			dep.Version = matches[5]
+			dep.Scope = matches[6]
+		case matches[5] != "":
+			// group:artifact:type:version:scope (standard Maven format)
+			dep.Version = matches[4]
+			dep.Scope = matches[5]
+		case matches[4] != "":
+			// group:artifact:type:version (no scope)
+			dep.Version = matches[4]
+			dep.Scope = "compile"
+		default:
+			// group:artifact:version (minimal)
+			dep.Version = matches[3]
+			dep.Scope = "compile"
+		}
+
+		// Skip dependencies with empty version (likely a BOM/pom import)
+		if dep.Version == "" {
+			mp.debugLog("Line %d: skipping dep with empty version: %s:%s", lineNum, dep.GroupID, dep.ArtifactID)
+			continue
+		}
+
+		// Try to locate the JAR file in local Maven repository
+		dep.JARPath = mp.findJARInLocalRepo(dep)
+
+		if dep.JARPath == "" {
+			mp.debugLog("Line %d: JAR not found for %s:%s:%s", lineNum, dep.GroupID, dep.ArtifactID, dep.Version)
+		} else {
+			mp.debugLog("Line %d: JAR resolved for %s:%s:%s -> %s", lineNum, dep.GroupID, dep.ArtifactID, dep.Version, dep.JARPath)
+		}
+
+		tree.Dependencies = append(tree.Dependencies, dep)
 	}
 
+	mp.debugLog("Parsed %d dependencies from Maven tree output", len(tree.Dependencies))
 	return tree, nil
 }
 
@@ -208,6 +360,14 @@ func (mp *MavenParser) parseDependenciesFromPOM(pom *POM) (*models.DependencyTre
 		Dependencies: make([]*models.Dependency, 0),
 	}
 
+	// Build a lookup map from dependencyManagement for version resolution
+	managedVersions := make(map[string]string)
+	for _, managed := range pom.DependencyManagement {
+		key := managed.GroupID + ":" + managed.ArtifactID
+		managedVersions[key] = managed.Version
+	}
+	mp.debugLog("Parsed %d dependencyManagement entries", len(managedVersions))
+
 	for _, dep := range pom.Dependencies {
 		modelDep := &models.Dependency{
 			GroupID:    resolveValue(dep.GroupID, pom),
@@ -216,17 +376,38 @@ func (mp *MavenParser) parseDependenciesFromPOM(pom *POM) (*models.DependencyTre
 			Scope:      resolveValue(dep.Scope, pom),
 			Classifier: resolveValue(dep.Classifier, pom),
 		}
-		
+
+		// If version is empty, try to resolve from dependencyManagement
+		if modelDep.Version == "" {
+			depKey := modelDep.GroupID + ":" + modelDep.ArtifactID
+			if managedVer, ok := managedVersions[depKey]; ok {
+				modelDep.Version = resolveValue(managedVer, pom)
+				mp.debugLog("Resolved version for %s from dependencyManagement: %s", depKey, modelDep.Version)
+			}
+		}
+
+		// If version is still empty but parent has a version, some Maven conventions
+		// allow inheriting the parent version — but only for BOM-like patterns.
+		// We don't blindly apply parent version to avoid false JAR lookups.
+
+		// Skip dependencies with no version (can't resolve JAR)
+		if modelDep.Version == "" {
+			mp.debugLog("Skipping %s:%s (no version resolved)", modelDep.GroupID, modelDep.ArtifactID)
+			continue
+		}
+
 		modelDep.JARPath = mp.findJARInLocalRepo(modelDep)
 		tree.Dependencies = append(tree.Dependencies, modelDep)
 	}
 
+	mp.debugLog("POM fallback parsed %d dependencies", len(tree.Dependencies))
 	return tree, nil
 }
 
 // findJARInLocalRepo attempts to locate the JAR file in the local Maven repository
 func (mp *MavenParser) findJARInLocalRepo(dep *models.Dependency) string {
 	if mp.localRepoPath == "" {
+		mp.debugLog("findJAR: localRepoPath is empty, cannot resolve %s:%s", dep.GroupID, dep.ArtifactID)
 		return ""
 	}
 
@@ -247,9 +428,13 @@ func (mp *MavenParser) findJARInLocalRepo(dep *models.Dependency) string {
 		jarFileName,
 	)
 
+	mp.debugLog("findJAR: looking for %s", jarPath)
+
 	// Check if file exists
 	if _, err := os.Stat(jarPath); err == nil {
 		return jarPath
+	} else {
+		mp.debugLog("findJAR: stat failed for %s: %v", jarPath, err)
 	}
 
 	return ""
@@ -259,6 +444,7 @@ func (mp *MavenParser) findJARInLocalRepo(dep *models.Dependency) string {
 func getLocalRepositoryPath() string {
 	// 1. Check environment variable override
 	if envPath := os.Getenv("MAVEN_REPO_LOCAL"); envPath != "" {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Local repo from env MAVEN_REPO_LOCAL: %s\n", filepath.Clean(envPath))
 		return filepath.Clean(envPath)
 	}
 
@@ -280,7 +466,9 @@ func getLocalRepositoryPath() string {
 					if strings.Contains(repoPath, "${user.home}") {
 						repoPath = strings.ReplaceAll(repoPath, "${user.home}", homeDir)
 					}
-					return filepath.Clean(repoPath)
+					cleaned := filepath.Clean(repoPath)
+					fmt.Fprintf(os.Stderr, "[DEBUG] Local repo from settings.xml: %s\n", cleaned)
+					return cleaned
 				}
 			}
 		}
@@ -288,7 +476,9 @@ func getLocalRepositoryPath() string {
 
 	// Default fallback
 	if homeDir != "" {
-		return filepath.Join(homeDir, ".m2", "repository")
+		defaultPath := filepath.Join(homeDir, ".m2", "repository")
+		fmt.Fprintf(os.Stderr, "[DEBUG] Local repo (default): %s\n", defaultPath)
+		return defaultPath
 	}
 	return ""
 }

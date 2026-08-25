@@ -38,6 +38,7 @@ var (
 	quiet         bool
 	noProgress    bool
 	summaryOnly   bool
+	debug         bool
 )
 
 func main() {
@@ -70,6 +71,9 @@ Examples:
   # Show progress steps but suppress per-dependency log
   netshield --packages com.yourcompany --no-progress
 
+  # Debug mode (verbose JAR path resolution)
+  netshield --packages com.yourcompany --debug
+
   # JSON output for programmatic consumption
   netshield --packages com.yourcompany --format json --quiet
 
@@ -90,6 +94,7 @@ Examples:
 	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress all progress output (stderr)")
 	rootCmd.PersistentFlags().BoolVar(&noProgress, "no-progress", false, "Suppress per-dependency CVE query log (keep step headers)")
 	rootCmd.PersistentFlags().BoolVar(&summaryOnly, "summary-only", false, "Show executive summary only, omit individual CVE details")
+	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "Enable debug output for troubleshooting JAR path resolution")
 
 	// Web UI flags
 	rootCmd.Flags().Bool("serve", false, "Start web UI server instead of CLI analysis")
@@ -131,6 +136,7 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[1/5] Parsing dependencies...\n")
 	}
 	mavenParser := parser.NewMavenParser(projectPath)
+	mavenParser.Debug = debug
 	depTree, err := mavenParser.ParseDependencies()
 	if err != nil {
 		return fmt.Errorf("failed to parse dependencies: %w", err)
@@ -145,6 +151,7 @@ func runAnalysis(cmd *cobra.Command, args []string) error {
 	}
 	builder := callgraph.NewBuilder(projectPath)
 	builder.Quiet = quiet
+	builder.Debug = debug
 
 	// Set application packages if provided
 	if len(appPackages) > 0 {
@@ -298,6 +305,7 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 
 	// 2. Run analysis pipeline
 	mavenParser := parser.NewMavenParser(projectPath)
+	mavenParser.Debug = debug
 	depTree, err := mavenParser.ParseDependencies()
 	if err != nil {
 		return fmt.Errorf("parse dependencies failed: %w", err)
@@ -305,6 +313,7 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 
 	builder := callgraph.NewBuilder(projectPath)
 	builder.Quiet = quiet
+	builder.Debug = debug
 	if len(appPackages) > 0 {
 		builder.SetApplicationPackages(appPackages)
 	}

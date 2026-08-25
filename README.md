@@ -229,6 +229,7 @@ Flags:
       --serve                  Start web UI server instead of CLI analysis
       --port int               Web UI server port (use with --serve) (default 8080)
       --key-stdin              Read API key securely from stdin
+      --debug                  Enable debug output for troubleshooting JAR path resolution
   -h, --help                   Help for netshield
 ```
 

@@ -26,6 +26,7 @@ type Builder struct {
 	classRegistry  map[string]*bytecode.ClassFile
 	isExternalMap  map[string]bool
 	Quiet          bool
+	Debug          bool
 }
 
 // NewBuilder creates a new call graph builder
@@ -37,6 +38,7 @@ func NewBuilder(projectPath string) *Builder {
 		classRegistry:  make(map[string]*bytecode.ClassFile),
 		isExternalMap:  make(map[string]bool),
 		Quiet:          false,
+		Debug:          false,
 	}
 }
 
@@ -100,6 +102,16 @@ func (b *Builder) BuildCallGraph(dependencies []*models.Dependency) (*models.Cal
 
 	if len(skippedDeps) > 0 && !b.Quiet {
 		fmt.Fprintf(os.Stderr, "  Warning: %d dependencies skipped from call graph (JAR paths empty/not found). Reachability for these will be UNKNOWN.\n", len(skippedDeps))
+		if b.Debug {
+			fmt.Fprintf(os.Stderr, "  Skipped dependencies:\n")
+			for i, dep := range skippedDeps {
+				if i >= 20 {
+					fmt.Fprintf(os.Stderr, "    ... and %d more\n", len(skippedDeps)-20)
+					break
+				}
+				fmt.Fprintf(os.Stderr, "    - %s\n", dep)
+			}
+		}
 	}
 
 	// Close results channel when all workers finish

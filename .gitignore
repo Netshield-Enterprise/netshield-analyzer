@@ -45,3 +45,7 @@ monitor.log
 
 # Java build directories
 target/
+
+# reports
+NetShield_Analyzer_Project_Report.docx
+*.docx
